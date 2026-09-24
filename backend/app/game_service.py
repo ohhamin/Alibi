@@ -564,4 +564,124 @@ class GameService:
 
         await cur.execute(
             """
-            select sc.id, sc.display_name, cc.system_prompt, cc.priv
+            select sc.id, sc.display_name, cc.system_prompt, cc.private_backstory, cc.objective,
+                   cc.personality, cc.initial_knowledge, cc.secrets, cc.lie_policy,
+                   st.known_facts, st.false_beliefs, st.memory_summary,
+                   rc.world_prompt,
+                   pc.display_name as player_name
+            from public.story_characters sc
+            join game_private.character_configs cc on cc.character_id = sc.id
+            join game_private.session_character_states st
+              on st.session_id = %s and st.character_id = sc.id
+            join game_private.story_runtime_configs rc on rc.story_version_id = sc.story_version_id
+            left join public.story_characters pc on pc.id = %s
+            where sc.id = %s and sc.story_version_id = %s
+            """,
+            (session['id'], session['player_character_id'], target_id, session['story_version_id']),
+        )
+        target = await cur.fetchone()
+        if target is None:
+            raise HTTPException(status_code=400, detail='대화할 수 없는 인물입니다.')
+
+        await cur.execute(
+            """
+            select content from game_private.agent_memories
+            where session_id = %s and character_id = %s
+            order by created_at desc limit 8
+            """,
+            (session['id'], target_id),
+        )
+        memories = [row['content'] for row in await cur.fetchall()]
+        memories.reverse()
+
+        await self._insert_action(cur, client_action_id, session['id'], turn['id'], request, payload=request.payload)
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'player', session['player_character_id'], 'dialogue', question
+        )
+
+        reply = await self.agent_service.generate_reply(
+            AgentContext(
+                world_prompt=target['world_prompt'],
+                character_name=target['display_name'],
+                system_prompt=target['system_prompt'],
+                private_backstory=target['private_backstory'],
+                objective=target['objective'],
+                personality=_as_dict(target['personality']),
+                initial_knowledge=_as_list(target['initial_knowledge']),
+                secrets=_as_list(target['secrets']),
+                lie_policy=_as_dict(target['lie_policy']),
+                known_facts=_as_list(target['known_facts']),
+                false_beliefs=_as_list(target['false_beliefs']),
+                memory_summary=target['memory_summary'],
+                memories=memories,
+                player_name=target['player_name'] or '플레이어',
+                question=question,
+            )
+        )
+        await self._insert_message(cur, session['id'], turn['id'], 'character', target_id, 'dialogue', reply)
+        await cur.execute(
+            """
+            insert into game_private.agent_memories
+              (session_id, character_id, turn_id, memory_type, content, source_key, salience, confidence, is_secret)
+            values (%s, %s, %s, 'dialogue', %s, %s, 70, 1.0, false)
+            """,
+            (session['id'], target_id, turn['id'], f"{target['player_name'] or '플레이어'}가 '{question}'라고 물었고 나는 '{reply}'라고 답했다.", client_action_id),
+        )
+
+    async def _advance_round(self, cur, session, turn, state) -> None:
+        await cur.execute(
+            "update public.game_turns set status = 'resolved', closed_at = now() where id = %s",
+            (turn['id'],),
+        )
+        current_round = int(session['current_turn'])
+        max_rounds = int(state.get('max_rounds', 6))
+        if current_round >= max_rounds:
+            session['current_phase'] = 'accusation'
+            state['actions_remaining'] = 0
+            await self._insert_message(
+                cur, session['id'], turn['id'], 'narrator', None, 'narration',
+                '조사 시간이 끝났다. 이제 한 사람을 최종 지목해야 한다.'
+            )
+            return
+
+        next_round = current_round + 1
+        session['current_turn'] = next_round
+        state['round'] = next_round
+        state['actions_remaining'] = int(state.get('actions_per_round', 2))
+        await cur.execute(
+            "insert into public.game_turns (session_id, turn_no, status) values (%s, %s, 'open') returning id",
+            (session['id'], next_round),
+        )
+        new_turn_id = (await cur.fetchone())['id']
+        await self._insert_message(
+            cur, session['id'], new_turn_id, 'narrator', None, 'narration',
+            f"라운드 {next_round}이 시작되었다. 남은 핵심 행동은 {state['actions_remaining']}회다."
+        )
+
+    async def _insert_action(self, cur, client_action_id, session_id, turn_id, request, payload) -> None:
+        await cur.execute(
+            """
+            insert into public.player_actions
+              (client_action_id, session_id, turn_id, action_type, target_character_id, input_text, payload)
+            values (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                client_action_id,
+                session_id,
+                turn_id,
+                request.action_type,
+                str(request.target_character_id) if request.target_character_id else None,
+                request.input_text,
+                Jsonb(payload or {}),
+            ),
+        )
+
+    async def _insert_message(self, cur, session_id, turn_id, speaker_type, speaker_character_id, message_kind, content) -> None:
+        await cur.execute(
+            """
+            insert into public.session_messages
+              (session_id, turn_id, speaker_type, speaker_character_id, message_kind, content)
+            values (%s, %s, %s, %s, %s, %s)
+            """,
+            (session_id, turn_id, speaker_type, speaker_character_id, message_kind, content),
+        )
