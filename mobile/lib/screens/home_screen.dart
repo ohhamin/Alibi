@@ -115,6 +115,44 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _deleteSession(Map<String, dynamic> session) async {
+    final storyTitle = session['story_title'] as String? ?? '저장 게임';
+    final playerName = session['player_name'] as String? ?? '';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('저장 게임 삭제'),
+        content: Text(
+          "'$storyTitle'${playerName.isEmpty ? '' : ' · $playerName'} 저장 데이터를 삭제할까요?\n삭제한 데이터는 복구할 수 없습니다.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await _api.delete('/sessions/${session['id']}');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('저장 게임을 삭제했습니다.')),
+      );
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -151,7 +189,17 @@ class _HomeScreenState extends State<HomeScreen> {
                                     leading: const Icon(Icons.history),
                                     title: Text(s['story_title'] as String? ?? ''),
                                     subtitle: Text('${s['player_name'] ?? ''} · 라운드 ${s['current_turn']}'),
-                                    trailing: const Icon(Icons.play_arrow),
+                                    trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        IconButton(
+                                          tooltip: '저장 게임 삭제',
+                                          onPressed: () => _deleteSession(s),
+                                          icon: const Icon(Icons.delete_outline),
+                                        ),
+                                        const Icon(Icons.play_arrow),
+                                      ],
+                                    ),
                                     onTap: () => _resume(s['id'] as String),
                                   ),
                                 ),
