@@ -69,8 +69,10 @@ class _GameScreenState extends State<GameScreen> {
         '/sessions/$_sessionId/actions',
         body: {
           'action_type': actionType,
+          // ignore: use_null_aware_elements
           if (targetCharacterId != null)
             'target_character_id': targetCharacterId,
+          // ignore: use_null_aware_elements
           if (inputText != null) 'input_text': inputText,
           'payload': payload ?? <String, dynamic>{},
         },
@@ -163,7 +165,7 @@ class _GameScreenState extends State<GameScreen> {
                     : ListView.separated(
                         padding: const EdgeInsets.all(16),
                         itemCount: _clues.length,
-                        separatorBuilder: (_, __) =>
+                        separatorBuilder: (_, _) =>
                             const SizedBox(height: 10),
                         itemBuilder: (context, index) {
                           final clue = _clues[index];
