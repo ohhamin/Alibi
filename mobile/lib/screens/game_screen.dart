@@ -186,6 +186,17 @@ class _GameScreenState extends State<GameScreen> {
                                     style:
                                         Theme.of(context).textTheme.bodySmall,
                                   ),
+                                  if (!_completed && !_accusation) ...[
+                                    const SizedBox(height: 10),
+                                    OutlinedButton.icon(
+                                      onPressed: () {
+                                        Navigator.pop(context);
+                                        _presentClue(clue);
+                                      },
+                                      icon: const Icon(Icons.record_voice_over),
+                                      label: const Text('인물에게 제시'),
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),
@@ -197,6 +208,40 @@ class _GameScreenState extends State<GameScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  Future<void> _presentClue(Map<String, dynamic> clue) async {
+    final targets =
+        _characters.where((c) => c['id'] != _playerCharacterId).toList();
+    final target = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          children: [
+            ListTile(
+              title: Text("'${clue['title']}'을 누구에게 제시할까?"),
+              subtitle: const Text('증거 제시는 행동 1회를 소모합니다.'),
+            ),
+            ...targets.map(
+              (character) => ListTile(
+                leading: const Icon(Icons.person_outline),
+                title: Text(character['display_name'] as String? ?? ''),
+                subtitle: Text(character['role_label'] as String? ?? ''),
+                onTap: () => Navigator.pop(context, character),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (target == null) return;
+    await _act(
+      'present',
+      targetCharacterId: target['id'] as String,
+      payload: {'clue_code': clue['clue_code']},
     );
   }
 
