@@ -366,6 +366,9 @@ class GameService:
                     elif request.action_type == 'ask':
                         await self._handle_ask(cur, session, turn, state, request, client_action_id)
                         consumed = 1
+                    elif request.action_type == 'present':
+                        await self._handle_present(cur, session, turn, state, request, client_action_id)
+                        consumed = 1
                     else:
                         raise HTTPException(status_code=400, detail='지원하지 않는 행동입니다.')
 
@@ -641,6 +644,120 @@ class GameService:
             values (%s, %s, %s, 'dialogue', %s, %s, 70, 1.0, false)
             """,
             (session['id'], target_id, turn['id'], f"{target['player_name'] or '플레이어'}가 '{question}'라고 물었고 나는 '{reply}'라고 답했다.", client_action_id),
+        )
+
+    async def _handle_present(self, cur, session, turn, state, request, client_action_id: str) -> None:
+        if request.target_character_id is None:
+            raise HTTPException(status_code=400, detail='증거를 제시할 인물을 선택하세요.')
+        clue_code = str(request.payload.get('clue_code') or '').strip()
+        if not clue_code:
+            raise HTTPException(status_code=400, detail='제시할 증거가 필요합니다.')
+
+        target_id = str(request.target_character_id)
+        if session['player_character_id'] and target_id == str(session['player_character_id']):
+            raise HTTPException(status_code=400, detail='자기 자신에게 증거를 제시할 수 없습니다.')
+
+        await cur.execute(
+            """
+            select clue_code, title, content
+            from public.session_clues
+            where session_id = %s and clue_code = %s
+            """,
+            (session['id'], clue_code),
+        )
+        clue = await cur.fetchone()
+        if clue is None:
+            raise HTTPException(status_code=400, detail='아직 발견하지 않은 증거입니다.')
+
+        await cur.execute(
+            """
+            select sc.id, sc.display_name, cc.system_prompt, cc.private_backstory, cc.objective,
+                   cc.personality, cc.initial_knowledge, cc.secrets, cc.lie_policy,
+                   st.known_facts, st.false_beliefs, st.memory_summary,
+                   rc.world_prompt,
+                   pc.display_name as player_name
+            from public.story_characters sc
+            join game_private.character_configs cc on cc.character_id = sc.id
+            join game_private.session_character_states st
+              on st.session_id = %s and st.character_id = sc.id
+            join game_private.story_runtime_configs rc on rc.story_version_id = sc.story_version_id
+            left join public.story_characters pc on pc.id = %s
+            where sc.id = %s and sc.story_version_id = %s
+            """,
+            (session['id'], session['player_character_id'], target_id, session['story_version_id']),
+        )
+        target = await cur.fetchone()
+        if target is None:
+            raise HTTPException(status_code=400, detail='증거를 제시할 수 없는 인물입니다.')
+
+        await cur.execute(
+            """
+            select content from game_private.agent_memories
+            where session_id = %s and character_id = %s
+            order by created_at desc limit 8
+            """,
+            (session['id'], target_id),
+        )
+        memories = [row['content'] for row in await cur.fetchall()]
+        memories.reverse()
+
+        await self._insert_action(
+            cur,
+            client_action_id,
+            session['id'],
+            turn['id'],
+            request,
+            payload={'clue_code': clue_code},
+        )
+        prompt = (
+            f"플레이어가 증거 '{clue['title']}'을 제시했다. "
+            f"증거 내용은 '{clue['content']}'이다. "
+            "이 증거를 직접 확인한 상황으로 받아들이고, 설정된 거짓말 정책과 알고 있는 사실 범위 안에서 반응하라."
+        )
+        reply = await self.agent_service.generate_reply(
+            AgentContext(
+                world_prompt=target['world_prompt'],
+                character_name=target['display_name'],
+                system_prompt=target['system_prompt'],
+                private_backstory=target['private_backstory'],
+                objective=target['objective'],
+                personality=_as_dict(target['personality']),
+                initial_knowledge=_as_list(target['initial_knowledge']),
+                secrets=_as_list(target['secrets']),
+                lie_policy=_as_dict(target['lie_policy']),
+                known_facts=_as_list(target['known_facts']),
+                false_beliefs=_as_list(target['false_beliefs']),
+                memory_summary=target['memory_summary'],
+                memories=memories,
+                player_name=target['player_name'] or '플레이어',
+                question=prompt,
+            )
+        )
+        await self._insert_message(
+            cur,
+            session['id'],
+            turn['id'],
+            'system',
+            None,
+            'choice_result',
+            f"{target['display_name']}에게 증거 '{clue['title']}'을 제시했다.",
+        )
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'character', target_id, 'dialogue', reply
+        )
+        await cur.execute(
+            """
+            insert into game_private.agent_memories
+              (session_id, character_id, turn_id, memory_type, content, source_key, salience, confidence, is_secret)
+            values (%s, %s, %s, 'evidence', %s, %s, 85, 1.0, false)
+            """,
+            (
+                session['id'],
+                target_id,
+                turn['id'],
+                f"플레이어가 증거 '{clue['title']}'을 제시했고 나는 '{reply}'라고 반응했다.",
+                client_action_id,
+            ),
         )
 
     async def _advance_round(self, cur, session, turn, state) -> None:
