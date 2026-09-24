@@ -6,7 +6,13 @@ from fastapi import HTTPException, status
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .agent_service import (\n    AgentContext,\n    AgentService,\n    DetectiveVerdictContext,\n    GameMasterContext,\n    NpcActionContext,\n)
+from .agent_service import (
+    AgentContext,
+    AgentService,
+    DetectiveVerdictContext,
+    GameMasterContext,
+    NpcActionContext,
+)
 from .db import pool
 from .schemas import AccuseRequest, ActionRequest, StartSessionRequest
 
