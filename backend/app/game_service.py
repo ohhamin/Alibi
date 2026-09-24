@@ -1484,42 +1484,26 @@ class GameService:
                 await self._npc_investigate(cur, session, turn, state, actor, current_code, intent)
             elif action_type == 'talk':
                 target_id = str(choice.get('target_character_id') or '')
-                valid_targets = {str(row['id']) for row in same_room}
+                valid_targets = {
+                    str(row['id'])
+                    for row in same_room
+                    if not session['player_character_id']
+                    or str(row['id']) != str(session['player_character_id'])
+                }
                 if target_id not in valid_targets:
                     action_type = 'observe'
                 else:
                     target = next(row for row in same_room if str(row['id']) == target_id)
-                    content = f"{actor['display_name']}이(가) {target['display_name']}에게 말을 걸었다."
-                    await self._insert_internal_event(
+                    await self._npc_talk(
                         cur,
                         session,
-                        'npc_talk',
-                        actor_character_id=actor['id'],
-                        target_character_id=target_id,
-                        payload={'location_code': current_code, 'intent': intent},
+                        turn,
+                        state,
+                        actor,
+                        target,
+                        current_code,
+                        intent,
                     )
-                    await self._remember(
-                        cur,
-                        session['id'],
-                        actor['id'],
-                        turn['id'],
-                        'dialogue',
-                        content,
-                        f"npc-talk:{session['current_turn']}:{actor['id']}:{target_id}",
-                    )
-                    await self._remember(
-                        cur,
-                        session['id'],
-                        target_id,
-                        turn['id'],
-                        'dialogue',
-                        content,
-                        f"npc-talk-heard:{session['current_turn']}:{actor['id']}:{target_id}",
-                    )
-                    if state.get('current_location') == current_code:
-                        await self._insert_message(
-                            cur, session['id'], turn['id'], 'narrator', None, 'npc_action', content
-                        )
                     continue
 
             if action_type == 'observe':
@@ -1546,6 +1530,134 @@ class GameService:
                     )
 
         await self._refresh_known_locations(cur, session, state)
+
+    async def _npc_talk(
+        self,
+        cur,
+        session,
+        turn,
+        state,
+        actor,
+        target,
+        location_code: str,
+        intent: str,
+    ) -> None:
+        target_id = str(target['id'])
+        await cur.execute(
+            """
+            select sc.id, sc.display_name,
+                   cc.system_prompt, cc.private_backstory, cc.objective,
+                   cc.personality, cc.initial_knowledge, cc.secrets, cc.lie_policy,
+                   st.known_facts, st.false_beliefs, st.memory_summary,
+                   rc.world_prompt
+            from public.story_characters sc
+            join game_private.character_configs cc on cc.character_id = sc.id
+            join game_private.session_character_states st
+              on st.session_id = %s and st.character_id = sc.id
+            join game_private.story_runtime_configs rc
+              on rc.story_version_id = sc.story_version_id
+            where sc.id = %s and sc.story_version_id = %s
+            """,
+            (session['id'], target_id, session['story_version_id']),
+        )
+        target_ctx = await cur.fetchone()
+        if target_ctx is None:
+            return
+
+        await cur.execute(
+            """
+            select content
+            from game_private.agent_memories
+            where session_id = %s and character_id = %s
+            order by created_at desc
+            limit 10
+            """,
+            (session['id'], target_id),
+        )
+        target_memories = [row['content'] for row in await cur.fetchall()]
+        target_memories.reverse()
+
+        question = (
+            f"{intent} "
+            "사건과 관련해서 네가 직접 본 것, 들은 것, 기억하는 동선을 말해 줘. "
+            "확실하지 않은 것은 확실한 척하지 마."
+        )
+        reply = await self.agent_service.generate_reply(
+            AgentContext(
+                world_prompt=target_ctx['world_prompt'],
+                character_name=target_ctx['display_name'],
+                system_prompt=target_ctx['system_prompt'],
+                private_backstory=target_ctx['private_backstory'],
+                objective=target_ctx['objective'],
+                personality=_as_dict(target_ctx['personality']),
+                initial_knowledge=_as_list(target_ctx['initial_knowledge']),
+                secrets=_as_list(target_ctx['secrets']),
+                lie_policy=_as_dict(target_ctx['lie_policy']),
+                known_facts=_as_list(target_ctx['known_facts']),
+                false_beliefs=_as_list(target_ctx['false_beliefs']),
+                memory_summary=target_ctx['memory_summary'],
+                memories=target_memories,
+                player_name=actor['display_name'],
+                question=question,
+            )
+        )
+
+        exchange = (
+            f"{actor['display_name']}이(가) {target_ctx['display_name']}에게 사건에 대해 물었고, "
+            f"{target_ctx['display_name']}은(는) '{reply}'라고 답했다."
+        )
+        await self._insert_internal_event(
+            cur,
+            session,
+            'npc_talk',
+            actor_character_id=actor['id'],
+            target_character_id=target_id,
+            payload={
+                'location_code': location_code,
+                'intent': intent,
+                'reply': reply,
+            },
+        )
+        await self._remember(
+            cur,
+            session['id'],
+            actor['id'],
+            turn['id'],
+            'testimony',
+            f"{target_ctx['display_name']}의 진술: {reply}",
+            f"npc-testimony:{session['current_turn']}:{actor['id']}:{target_id}",
+            salience=80,
+        )
+        await self._remember(
+            cur,
+            session['id'],
+            target_id,
+            turn['id'],
+            'dialogue',
+            exchange,
+            f"npc-talk-heard:{session['current_turn']}:{actor['id']}:{target_id}",
+            salience=65,
+        )
+        await self._record_witnesses(
+            cur,
+            session,
+            turn,
+            location_code,
+            exchange,
+            source_key=f"npc-talk-witness:{session['current_turn']}:{actor['id']}:{target_id}",
+            exclude_ids={str(actor['id']), target_id},
+        )
+
+        if state.get('current_location') == location_code:
+            await self._insert_message(
+                cur,
+                session['id'],
+                turn['id'],
+                'narrator',
+                None,
+                'npc_action',
+                exchange,
+            )
 
     async def _npc_investigate(self, cur, session, turn, state, actor, location_code: str, intent: str) -> None:
         await cur.execute(
