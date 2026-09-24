@@ -29,6 +29,20 @@ jobs:
         run: |
           flutter create --platforms=android --org com.ohhamin --project-name alibi .
           rm -f test/widget_test.dart
+          python - <<'PY'
+          from pathlib import Path
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text()
+          permission = '    <uses-permission android:name="android.permission.INTERNET" />\n'
+          if 'android.permission.INTERNET' not in text:
+              text = text.replace(
+                  '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n',
+                  '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n' + permission,
+                  1,
+              )
+              manifest.write_text(text)
+          PY
 
       - name: Install dependencies
         working-directory: mobile
