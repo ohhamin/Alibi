@@ -12,6 +12,8 @@ class GameScreen extends StatefulWidget {
 
 class _GameScreenState extends State<GameScreen> {
   final _api = ApiClient();
+  final _actionController = TextEditingController();
+  final _actionFocus = FocusNode();
   late Map<String, dynamic> _state;
   bool _busy = false;
 
@@ -27,6 +29,13 @@ class _GameScreenState extends State<GameScreen> {
       ((_state['locations'] as List?) ?? const []).cast<Map<String, dynamic>>();
   List<Map<String, dynamic>> get _characters =>
       ((_state['characters'] as List?) ?? const []).cast<Map<String, dynamic>>();
+  List<Map<String, dynamic>> get _visibleCharacters =>
+      ((_state['visible_characters'] as List?) ?? const [])
+          .cast<Map<String, dynamic>>();
+  Map<String, dynamic> get _knownCharacterLocations =>
+      (_state['known_character_locations'] as Map<String, dynamic>?) ?? const {};
+  Map<String, dynamic>? get _currentLocationDetail =>
+      _state['current_location_detail'] as Map<String, dynamic>?;
   Map<String, dynamic>? get _playerRole =>
       _state['player_role'] as Map<String, dynamic>?;
 
@@ -39,6 +48,13 @@ class _GameScreenState extends State<GameScreen> {
   void initState() {
     super.initState();
     _state = widget.initialState;
+  }
+
+  @override
+  void dispose() {
+    _actionController.dispose();
+    _actionFocus.dispose();
+    super.dispose();
   }
 
   Future<void> _run(Future<Map<String, dynamic>> Function() action) async {
@@ -78,6 +94,17 @@ class _GameScreenState extends State<GameScreen> {
         },
       ),
     );
+  }
+
+  Future<void> _submitFreeAction() async {
+    final text = _actionController.text.trim();
+    if (text.isEmpty || _busy) return;
+    _actionFocus.unfocus();
+    await _act('act', inputText: text);
+    if (mounted) {
+      _actionController.clear();
+      _actionFocus.requestFocus();
+    }
   }
 
   Future<void> _showRole() async {
@@ -214,8 +241,13 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   Future<void> _presentClue(Map<String, dynamic> clue) async {
-    final targets =
-        _characters.where((c) => c['id'] != _playerCharacterId).toList();
+    final targets = _visibleCharacters;
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('현재 같은 장소에 대화할 인물이 없습니다.')),
+      );
+      return;
+    }
     final target = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
       builder: (context) => SafeArea(
@@ -247,6 +279,21 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
+  String _knownPeopleText(String locationCode) {
+    final items = <String>[];
+    for (final character in _characters) {
+      final id = character['id'] as String?;
+      if (id == null || id == _playerCharacterId) continue;
+      final known = _knownCharacterLocations[id];
+      if (known is! Map) continue;
+      if (known['location_code'] != locationCode) continue;
+      final turn = known['turn_no'];
+      final name = character['display_name'] ?? '인물';
+      items.add(turn == null ? '$name' : '$name · $turn라운드 확인');
+    }
+    return items.join(', ');
+  }
+
   Future<void> _chooseMove() async {
     final current = _publicState['current_location'] as String?;
     final target = await showModalBottomSheet<Map<String, dynamic>>(
@@ -256,20 +303,32 @@ class _GameScreenState extends State<GameScreen> {
           shrinkWrap: true,
           padding: const EdgeInsets.symmetric(vertical: 12),
           children: [
-            const ListTile(title: Text('이동할 장소')),
-            ..._locations.map(
-              (location) => ListTile(
+            const ListTile(
+              title: Text('이동할 장소'),
+              subtitle: Text('이동도 행동 1회를 사용합니다. 인물 위치는 마지막으로 직접 확인한 정보입니다.'),
+            ),
+            ..._locations.map((location) {
+              final code = location['location_code'] as String? ?? '';
+              final known = _knownPeopleText(code);
+              return ListTile(
                 leading: Icon(
-                  location['location_code'] == current
-                      ? Icons.location_on
-                      : Icons.place_outlined,
+                  code == current ? Icons.my_location : Icons.place_outlined,
                 ),
                 title: Text(location['name'] as String? ?? ''),
-                subtitle: Text(location['description'] as String? ?? ''),
-                enabled: location['location_code'] != current,
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(location['description'] as String? ?? ''),
+                    if (known.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text('마지막 확인: $known'),
+                    ],
+                  ],
+                ),
+                enabled: code != current,
                 onTap: () => Navigator.pop(context, location),
-              ),
-            ),
+              );
+            }),
           ],
         ),
       ),
@@ -282,9 +341,14 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   Future<void> _askCharacter() async {
-    final targets =
-        _characters.where((c) => c['id'] != _playerCharacterId).toList();
-    Map<String, dynamic>? selected = targets.isNotEmpty ? targets.first : null;
+    final targets = _visibleCharacters;
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('현재 같은 장소에 대화할 인물이 없습니다.')),
+      );
+      return;
+    }
+    Map<String, dynamic>? selected = targets.first;
     final controller = TextEditingController();
 
     final result = await showModalBottomSheet<Map<String, String>>(
@@ -505,29 +569,27 @@ class _GameScreenState extends State<GameScreen> {
             phase: _session['current_phase'] as String? ?? '',
           ),
           if (_busy) const LinearProgressIndicator(minHeight: 2),
+          if (!_completed)
+            _SceneCard(
+              locationName: '$currentLocation',
+              description:
+                  _currentLocationDetail?['description'] as String? ?? '',
+              people: _visibleCharacters,
+            ),
           Expanded(
             child: _completed
                 ? _EndingView(state: _state)
                 : _MessageTimeline(messages: _messages),
           ),
           if (!_completed)
-            _ActionPanel(
+            _ActionComposer(
               disabled: _busy,
               accusation: _accusation,
+              controller: _actionController,
+              focusNode: _actionFocus,
+              onSubmit: _submitFreeAction,
               onMove: _chooseMove,
-              onSearch: () => _act(
-                'search',
-                payload: {
-                  'location_code': _publicState['current_location'],
-                },
-              ),
-              onInspect: () => _act(
-                'inspect',
-                payload: {
-                  'location_code': _publicState['current_location'],
-                },
-              ),
-              onAsk: _askCharacter,
+              onTalk: _askCharacter,
               onAccuse: _accuse,
             ),
         ],
@@ -561,7 +623,7 @@ class _StatusBar extends StatelessWidget {
         runSpacing: 8,
         children: [
           Chip(label: Text('라운드 $round / $maxRounds')),
-          Chip(label: Text('남은 행동 $remaining')),
+          Chip(label: Text('행동 $remaining / 2')),
           Chip(
             avatar: const Icon(Icons.place_outlined, size: 18),
             label: Text(location),
@@ -649,23 +711,89 @@ class _MessageTimeline extends StatelessWidget {
   }
 }
 
-class _ActionPanel extends StatelessWidget {
-  const _ActionPanel({
+class _SceneCard extends StatelessWidget {
+  const _SceneCard({
+    required this.locationName,
+    required this.description,
+    required this.people,
+  });
+
+  final String locationName;
+  final String description;
+  final List<Map<String, dynamic>> people;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.room_outlined),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    locationName,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+              ],
+            ),
+            if (description.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(description),
+            ],
+            const SizedBox(height: 10),
+            Text(
+              '현재 이곳에 있는 인물',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 6),
+            if (people.isEmpty)
+              const Text('아무도 없다.')
+            else
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: people
+                    .map(
+                      (p) => Chip(
+                        avatar: const Icon(Icons.person_outline, size: 17),
+                        label: Text(p['display_name'] as String? ?? '인물'),
+                      ),
+                    )
+                    .toList(),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ActionComposer extends StatelessWidget {
+  const _ActionComposer({
     required this.disabled,
     required this.accusation,
+    required this.controller,
+    required this.focusNode,
+    required this.onSubmit,
     required this.onMove,
-    required this.onSearch,
-    required this.onInspect,
-    required this.onAsk,
+    required this.onTalk,
     required this.onAccuse,
   });
 
   final bool disabled;
   final bool accusation;
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final VoidCallback onSubmit;
   final VoidCallback onMove;
-  final VoidCallback onSearch;
-  final VoidCallback onInspect;
-  final VoidCallback onAsk;
+  final VoidCallback onTalk;
   final VoidCallback onAccuse;
 
   @override
@@ -675,6 +803,7 @@ class _ActionPanel extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
         decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
           border: Border(
             top: BorderSide(color: Theme.of(context).dividerColor),
           ),
@@ -688,65 +817,57 @@ class _ActionPanel extends StatelessWidget {
                   label: const Text('최종 지목하기'),
                 ),
               )
-            : Row(
+            : Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Expanded(
-                    child: _ActionButton(
-                      icon: Icons.directions_walk,
-                      label: '이동',
-                      onPressed: disabled ? null : onMove,
+                  TextField(
+                    controller: controller,
+                    focusNode: focusNode,
+                    enabled: !disabled,
+                    minLines: 1,
+                    maxLines: 3,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) {
+                      if (!disabled) onSubmit();
+                    },
+                    decoration: InputDecoration(
+                      hintText: '무엇을 할까?  예: 책상 오른쪽 서랍을 열어본다',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        tooltip: '행동하기',
+                        onPressed: disabled ? null : onSubmit,
+                        icon: const Icon(Icons.arrow_upward),
+                      ),
                     ),
                   ),
-                  Expanded(
-                    child: _ActionButton(
-                      icon: Icons.search,
-                      label: '수색',
-                      onPressed: disabled ? null : onSearch,
-                    ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: disabled ? null : onMove,
+                          icon: const Icon(Icons.directions_walk),
+                          label: const Text('이동 · 1'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: disabled ? null : onTalk,
+                          icon: const Icon(Icons.forum_outlined),
+                          label: const Text('대화 · 1'),
+                        ),
+                      ),
+                    ],
                   ),
-                  Expanded(
-                    child: _ActionButton(
-                      icon: Icons.visibility_outlined,
-                      label: '조사',
-                      onPressed: disabled ? null : onInspect,
-                    ),
-                  ),
-                  Expanded(
-                    child: _ActionButton(
-                      icon: Icons.forum_outlined,
-                      label: '심문',
-                      onPressed: disabled ? null : onAsk,
-                    ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '불가능하거나 대상이 없는 행동은 행동 횟수를 소모하지 않습니다.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                    textAlign: TextAlign.center,
                   ),
                 ],
               ),
-      ),
-    );
-  }
-}
-
-class _ActionButton extends StatelessWidget {
-  const _ActionButton({
-    required this.icon,
-    required this.label,
-    required this.onPressed,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return TextButton(
-      onPressed: onPressed,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon),
-          const SizedBox(height: 4),
-          Text(label),
-        ],
       ),
     );
   }
