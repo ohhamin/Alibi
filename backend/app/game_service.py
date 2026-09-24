@@ -677,7 +677,7 @@ class GameService:
             turn['id'],
             'player',
             session['player_character_id'],
-            'action',
+            'choice_result',
             f"{location['name']}으로 이동한다.",
         )
 
@@ -913,7 +913,7 @@ class GameService:
             turn['id'],
             'player',
             session['player_character_id'],
-            'action',
+            'choice_result',
             action_text,
         )
 
@@ -1467,7 +1467,7 @@ class GameService:
                             else f"{actor['display_name']}이(가) {target_name}에 들어왔다."
                         )
                         await self._insert_message(
-                            cur, session['id'], turn['id'], 'narrator', None, 'npc_action', text
+                            cur, session['id'], turn['id'], 'narrator', None, 'narration', text
                         )
                     await self._record_npc_action_memories(
                         cur,
@@ -1526,7 +1526,7 @@ class GameService:
                 )
                 if state.get('current_location') == current_code:
                     await self._insert_message(
-                        cur, session['id'], turn['id'], 'narrator', None, 'npc_action', content
+                        cur, session['id'], turn['id'], 'narrator', None, 'narration', content
                     )
 
         await self._refresh_known_locations(cur, session, state)
@@ -1655,7 +1655,7 @@ class GameService:
                 turn['id'],
                 'narrator',
                 None,
-                'npc_action',
+                'narration',
                 exchange,
             )
 
@@ -1743,7 +1743,7 @@ class GameService:
         )
         if state.get('current_location') == location_code:
             await self._insert_message(
-                cur, session['id'], turn['id'], 'narrator', None, 'npc_action', content
+                cur, session['id'], turn['id'], 'narrator', None, 'narration', content
             )
         await self._record_witnesses(
             cur,
