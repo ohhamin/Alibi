@@ -26,7 +26,9 @@ jobs:
 
       - name: Generate modern Android project files
         working-directory: mobile
-        run: flutter create --platforms=android --org com.ohhamin --project-name alibi .
+        run: |
+          flutter create --platforms=android --org com.ohhamin --project-name alibi .
+          rm -f test/widget_test.dart
 
       - name: Install dependencies
         working-directory: mobile
