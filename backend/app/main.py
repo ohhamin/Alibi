@@ -60,6 +60,11 @@ async def create_session(request: StartSessionRequest, user: AuthUser = Depends(
 async def session_state(session_id: str, user: AuthUser = Depends(get_current_user)):
     return await game_service.get_session_state(user.id, session_id)
 
+@app.delete('/api/v1/sessions/{session_id}')
+async def remove_session(session_id: str, user: AuthUser = Depends(get_current_user)):
+    return await game_service.delete_session(user.id, session_id)
+
+
 
 @app.post('/api/v1/sessions/{session_id}/actions')
 async def action(session_id: str, request: ActionRequest, user: AuthUser = Depends(get_current_user)):
