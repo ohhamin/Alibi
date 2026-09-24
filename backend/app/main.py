@@ -22,7 +22,7 @@ async def lifespan(_: FastAPI):
     await close_pool()
 
 
-app = FastAPI(title=settings.app_name, version='0.1.0', lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version='0.2.0', lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -33,8 +33,12 @@ app.add_middleware(
 
 
 @app.get('/health')
-async def health() -> dict[str, str]:
-    return {'status': 'ok'}
+async def health() -> dict[str, str | bool]:
+    return {
+        'status': 'ok',
+        'environment': settings.environment,
+        'openai_configured': agent_service.enabled,
+    }
 
 
 @app.get('/api/v1/stories')
