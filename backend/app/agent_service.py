@@ -173,7 +173,7 @@ JSON 형식:
             'hidden_candidates': ctx.hidden_candidates,
             'player_action': ctx.action_text,
         }
-        return await self._json_response(instructions, json.dumps(payload, ensure_ascii=False), fallback)
+        return await self._json_response(instructions, json.dumps(payload, ensure_ascii=False, default=str), fallback)
 
     async def narrate_game_action(
         self,
@@ -258,7 +258,7 @@ JSON 형식:
             'recent_memories': ctx.memories,
             'is_detective': ctx.is_detective,
         }
-        return await self._json_response(instructions, json.dumps(payload, ensure_ascii=False), fallback)
+        return await self._json_response(instructions, json.dumps(payload, ensure_ascii=False, default=str), fallback)
 
     async def choose_detective_verdict(self, ctx: DetectiveVerdictContext) -> dict[str, Any]:
         fallback = {
@@ -285,7 +285,7 @@ JSON 형식:
             'memories': ctx.memories,
             'candidates': ctx.candidates,
         }
-        return await self._json_response(instructions, json.dumps(payload, ensure_ascii=False), fallback)
+        return await self._json_response(instructions, json.dumps(payload, ensure_ascii=False, default=str), fallback)
 
     async def _json_response(
         self,
