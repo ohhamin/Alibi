@@ -53,13 +53,29 @@ class ApiClient {
       response = await _client.get(uri, headers: headers);
     }
 
-    final decoded = response.body.isEmpty
-        ? <String, dynamic>{}
-        : jsonDecode(response.body) as Map<String, dynamic>;
+    Map<String, dynamic> decoded = <String, dynamic>{};
+    if (response.body.isNotEmpty) {
+      try {
+        final value = jsonDecode(response.body);
+        if (value is Map<String, dynamic>) {
+          decoded = value;
+        }
+      } on FormatException {
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          throw ApiException(
+            '서버 응답 형식이 올바르지 않습니다.',
+            statusCode: response.statusCode,
+          );
+        }
+      }
+    }
+
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final detail = decoded['detail'];
       throw ApiException(
-        detail is String ? detail : '요청 처리 중 오류가 발생했습니다.',
+        detail is String
+            ? detail
+            : '서버에서 요청을 처리하지 못했습니다. (${response.statusCode})',
         statusCode: response.statusCode,
       );
     }
