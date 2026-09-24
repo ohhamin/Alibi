@@ -50,6 +50,7 @@ class NpcActionContext:
     character_name: str
     system_prompt: str
     objective: str | None
+    personality: dict[str, Any]
     current_location: str
     current_location_name: str
     adjacent_locations: list[dict[str, Any]]
@@ -57,6 +58,16 @@ class NpcActionContext:
     known_facts: list[Any]
     memories: list[str]
     is_detective: bool = False
+
+
+@dataclass
+class DetectiveBonusContext:
+    world_prompt: str
+    detective_name: str
+    known_facts: list[Any]
+    memories: list[str]
+    characters: list[dict[str, Any]]
+    locations: list[dict[str, Any]]
 
 
 @dataclass
@@ -217,10 +228,14 @@ JSON 형식:
 
     async def choose_npc_action(self, ctx: NpcActionContext) -> dict[str, Any]:
         fallback = {
-            'action_type': 'observe',
-            'target_location_code': None,
+            'action_type': 'move' if ctx.adjacent_locations else 'investigate',
+            'target_location_code': (
+                ctx.adjacent_locations[0].get('code')
+                if ctx.adjacent_locations else None
+            ),
             'target_character_id': None,
-            'intent': '주변 상황을 살핀다.',
+            'question': None,
+            'intent': '자신의 목표에 따라 적극적으로 다음 단서를 찾는다.',
         }
         if self.client is None:
             return fallback
@@ -230,6 +245,7 @@ JSON 형식:
 세계관: {ctx.world_prompt}
 캐릭터 지침: {ctx.system_prompt}
 개인 목표: {ctx.objective or '없음'}
+성격/행동 성향: {json.dumps(ctx.personality, ensure_ascii=False)}
 
 현재 이 캐릭터가 실제로 아는 정보만으로 다음 행동 하나를 정한다.
 다른 장소에서 벌어진 일이나 다른 인물의 비밀을 전지적으로 알 수 없다.
@@ -240,11 +256,19 @@ JSON 형식:
 - talk: 현재 같은 장소의 인물 한 명에게 말을 건다
 - observe: 현재 장소에서 주변을 살핀다
 
+행동 원칙:
+- 성격과 개인 목표가 행동 선택에 실제로 드러나야 한다.
+- 같은 장소에 플레이어가 있으면 필요에 따라 플레이어에게도 talk를 선택할 수 있다.
+- 매번 observe만 반복하지 않는다. 가능한 경우 move / investigate / talk 중 의미 있는 행동을 우선한다.
+- 이미 최근에 반복한 행동은 피하고, 이동과 대화를 적극적으로 활용한다.
+- talk를 선택하면 상대에게 실제로 던질 한 문장 질문을 question에 작성한다.
+
 반드시 JSON 객체 하나만 출력한다.
 {{
   "action_type": "move" | "investigate" | "talk" | "observe",
   "target_location_code": "이동할 code 또는 null",
   "target_character_id": "대화 대상 id 또는 null",
+  "question": "talk일 때 실제 질문 한 문장 또는 null",
   "intent": "이 인물이 왜 이 행동을 하는지 짧게"
 }}
 """.strip()
@@ -257,9 +281,61 @@ JSON 형식:
             'same_room_characters': ctx.same_room_characters,
             'known_facts': ctx.known_facts,
             'recent_memories': ctx.memories,
+            'personality': ctx.personality,
             'is_detective': ctx.is_detective,
         }
         return await self._json_response(instructions, json.dumps(payload, ensure_ascii=False, default=str), fallback)
+
+    async def choose_detective_bonus_action(self, ctx: DetectiveBonusContext) -> dict[str, Any]:
+        fallback = {
+            'action_type': 'investigate',
+            'target_character_id': None,
+            'target_location_code': (
+                ctx.locations[0].get('code') if ctx.locations else None
+            ),
+            'question': None,
+            'intent': '아직 확인되지 않은 장소를 추가로 조사한다.',
+        }
+        if self.client is None:
+            return fallback
+
+        instructions = f"""
+당신은 탐정 '{ctx.detective_name}'이다.
+세계관: {ctx.world_prompt}
+
+매 라운드 종료 후 당신에게만 주어지는 '추가 수사' 1회를 선택한다.
+이 추가 수사는 현재 위치와 무관하게 수행할 수 있고, 그 행동과 결과는 현장 전체에 공개된다.
+당신이 실제로 확보한 사실과 기억만 사용한다.
+
+가능한 행동:
+- ask: 후보 인물 한 명에게 공개 질문을 한다.
+- investigate: 공개된 장소 한 곳을 추가 조사한다.
+
+규칙:
+- 이미 충분히 확인한 내용만 반복하지 않는다.
+- 가장 큰 정보 공백이나 진술 모순을 줄이는 행동을 고른다.
+- ask라면 question에 구체적인 한 문장 질문을 작성한다.
+- 반드시 JSON 객체 하나만 출력한다.
+
+{{
+  "action_type": "ask" | "investigate",
+  "target_character_id": "ask 대상 id 또는 null",
+  "target_location_code": "investigate 장소 code 또는 null",
+  "question": "ask 질문 또는 null",
+  "intent": "선택 이유 한 문장"
+}}
+""".strip()
+        payload = {
+            'known_facts': ctx.known_facts,
+            'memories': ctx.memories,
+            'characters': ctx.characters,
+            'locations': ctx.locations,
+        }
+        return await self._json_response(
+            instructions,
+            json.dumps(payload, ensure_ascii=False, default=str),
+            fallback,
+        )
 
     async def choose_detective_verdict(self, ctx: DetectiveVerdictContext) -> dict[str, Any]:
         fallback = {
