@@ -10,6 +10,7 @@ AI 캐릭터와 대화하며 사건을 푸는 턴제 추리게임 MVP입니다.
 - 선택한 캐릭터의 개인 배경/목표/비밀만 플레이어에게 공개
 - 6라운드, 라운드당 핵심 행동 2회
 - 장소 이동(무료), 수색, 조사, AI 인물 심문
+- 발견한 증거를 인물에게 제시하고 AI 반응 확인
 - 발견 증거/메시지/턴 상태 자동 저장
 - 캐릭터별 `agent_memories` 격리
 - 최종 지목 및 엔딩/정답 공개
@@ -86,12 +87,12 @@ Supabase URL과 publishable key는 공개 클라이언트 값이라 기본값을
 - `POST /api/v1/sessions/{session_id}/actions`
 - `POST /api/v1/sessions/{session_id}/accuse`
 
-행동 타입은 현재 `move`, `search`, `inspect`, `ask`를 지원합니다.
+행동 타입은 현재 `move`, `search`, `inspect`, `ask`, `present`를 지원합니다.
 
 ## 다음 개발 우선순위
 
 1. NPC/탐정의 라운드 종료 자동 행동 및 `scripted_events` 처리
-2. 증거 제시(`present`)와 인물별 반응/스트레스/신뢰도 변화
+2. 증거 제시에 따른 인물별 스트레스/신뢰도 변화
 3. 강해진 탐정의 독립 추리 및 범인 지목 로직 고도화
 4. LLM 실행 기록(`llm_runs`)과 비용/토큰 제한
 5. 스토리 커버 이미지, 효과음, 타이핑/대화 연출
