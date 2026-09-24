@@ -207,6 +207,28 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                         const SizedBox(height: 24),
                       ],
+                      if (_sessions.any((s) => s['status'] != 'active')) ...[
+                        Text('지난 기록', style: Theme.of(context).textTheme.titleLarge),
+                        const SizedBox(height: 10),
+                        ..._sessions.where((s) => s['status'] != 'active').map(
+                              (s) => Padding(
+                                padding: const EdgeInsets.only(bottom: 10),
+                                child: Card(
+                                  child: ListTile(
+                                    leading: const Icon(Icons.task_alt),
+                                    title: Text(s['story_title'] as String? ?? ''),
+                                    subtitle: Text('${s['player_name'] ?? ''} · 라운드 ${s['current_turn']} · 종료'),
+                                    trailing: IconButton(
+                                      tooltip: '저장 게임 삭제',
+                                      onPressed: () => _deleteSession(s),
+                                      icon: const Icon(Icons.delete_outline),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                        const SizedBox(height: 24),
+                      ],
                       Text('사건 파일', style: Theme.of(context).textTheme.titleLarge),
                       const SizedBox(height: 10),
                       ..._stories.map(
