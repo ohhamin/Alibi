@@ -29,6 +29,45 @@ class AgentContext:
     question: str
 
 
+@dataclass
+class GameMasterContext:
+    world_prompt: str
+    player_name: str
+    round_no: int
+    location_code: str
+    location_name: str
+    location_description: str
+    action_text: str
+    same_room_characters: list[dict[str, Any]]
+    discovered_clues: list[dict[str, Any]]
+    hidden_candidates: list[dict[str, Any]]
+
+
+@dataclass
+class NpcActionContext:
+    world_prompt: str
+    character_id: str
+    character_name: str
+    system_prompt: str
+    objective: str | None
+    current_location: str
+    current_location_name: str
+    adjacent_locations: list[dict[str, Any]]
+    same_room_characters: list[dict[str, Any]]
+    known_facts: list[Any]
+    memories: list[str]
+    is_detective: bool = False
+
+
+@dataclass
+class DetectiveVerdictContext:
+    world_prompt: str
+    detective_name: str
+    known_facts: list[Any]
+    memories: list[str]
+    candidates: list[dict[str, Any]]
+
+
 class AgentService:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -89,6 +128,215 @@ class AgentService:
         except OpenAIError:
             logger.exception('OpenAI character response failed; using deterministic fallback')
             return self._fallback_reply(ctx)
+
+    async def interpret_game_action(self, ctx: GameMasterContext) -> dict[str, Any]:
+        fallback = {
+            'allowed': bool(ctx.action_text.strip()),
+            'kind': 'interact',
+            'clue_code': None,
+            'reason': '현재 장소에서 시도할 수 있는 행동으로 처리합니다.',
+        }
+        if self.client is None:
+            return self._fallback_game_action(ctx, fallback)
+
+        instructions = f"""
+당신은 추리 게임의 '행동 판정 전용 게임 마스터'다.
+세계관: {ctx.world_prompt}
+
+중요 규칙:
+- 플레이어의 자연어 입력을 해석만 한다. 새로운 물건, 사람, 통로, 증거를 만들어내지 않는다.
+- 한 번의 입력은 하나의 원자적 행동만 허용한다. 여러 행동을 연속으로 수행하겠다는 입력은 allowed=false다.
+- 현재 장소에 존재하지 않는 대상, 현재 보이지 않는 사람, 이미 불가능하다고 명시된 행동은 allowed=false다.
+- 단순히 원하는 결과가 나오지 않는 것과 '행동 자체가 불가능한 것'을 구분한다. 시도 가능한 행동이면 allowed=true다.
+- hidden_candidates는 서버 내부 후보이며 플레이어에게 내용을 누설해서는 안 된다.
+- clue_code는 플레이어의 표현이 해당 단서의 대상/행동과 명확히 맞을 때만 선택한다. 단서가 있다는 이유만으로 자동 선택하지 않는다.
+- 반드시 JSON 객체 하나만 출력한다.
+
+JSON 형식:
+{{
+  "allowed": true 또는 false,
+  "kind": "interact" | "inspect" | "hide" | "alter" | "take" | "use",
+  "clue_code": "후보 code 또는 null",
+  "reason": "판정 이유를 한국어 한 문장으로"
+}}
+""".strip()
+        payload = {
+            'round': ctx.round_no,
+            'location': {
+                'code': ctx.location_code,
+                'name': ctx.location_name,
+                'description': ctx.location_description,
+            },
+            'player': ctx.player_name,
+            'same_room_characters': ctx.same_room_characters,
+            'already_discovered': ctx.discovered_clues,
+            'hidden_candidates': ctx.hidden_candidates,
+            'player_action': ctx.action_text,
+        }
+        return await self._json_response(instructions, json.dumps(payload, ensure_ascii=False), fallback)
+
+    async def narrate_game_action(
+        self,
+        ctx: GameMasterContext,
+        *,
+        allowed: bool,
+        result_text: str,
+    ) -> str:
+        if not allowed:
+            return result_text
+        if self.client is None:
+            return result_text
+
+        instructions = f"""
+당신은 추리 게임의 게임 마스터다.
+현재 장소는 '{ctx.location_name}'이고 묘사는 다음과 같다:
+{ctx.location_description}
+
+플레이어가 한 행동과 서버가 확정한 결과만 자연스럽게 묘사한다.
+새로운 물건, 인물, 단서, 통로, 사건을 절대 추가하지 않는다.
+서버 결과에 없는 비밀을 암시하지 않는다.
+한국어 1~3문장으로 짧고 구체적으로 쓴다.
+""".strip()
+        safe_input = json.dumps(
+            {'action': ctx.action_text, 'confirmed_result': result_text},
+            ensure_ascii=False,
+        )
+        try:
+            response = await self.client.responses.create(
+                model=self.settings.openai_model,
+                instructions=instructions,
+                input=safe_input,
+                max_output_tokens=min(self.settings.openai_max_output_tokens, 220),
+            )
+            text = (response.output_text or '').strip()
+            return text or result_text
+        except OpenAIError:
+            logger.exception('OpenAI GM narration failed; using deterministic result')
+            return result_text
+
+    async def choose_npc_action(self, ctx: NpcActionContext) -> dict[str, Any]:
+        fallback = {
+            'action_type': 'observe',
+            'target_location_code': None,
+            'target_character_id': None,
+            'intent': '주변 상황을 살핀다.',
+        }
+        if self.client is None:
+            return fallback
+
+        instructions = f"""
+당신은 '{ctx.character_name}' 한 명만 연기하는 독립 AI 에이전트다.
+세계관: {ctx.world_prompt}
+캐릭터 지침: {ctx.system_prompt}
+개인 목표: {ctx.objective or '없음'}
+
+현재 이 캐릭터가 실제로 아는 정보만으로 다음 행동 하나를 정한다.
+다른 장소에서 벌어진 일이나 다른 인물의 비밀을 전지적으로 알 수 없다.
+한 턴에는 정확히 한 행동만 한다.
+허용 행동:
+- move: 인접 장소 하나로 이동
+- investigate: 현재 장소를 조사
+- talk: 현재 같은 장소의 인물 한 명에게 말을 건다
+- observe: 현재 장소에서 주변을 살핀다
+
+반드시 JSON 객체 하나만 출력한다.
+{{
+  "action_type": "move" | "investigate" | "talk" | "observe",
+  "target_location_code": "이동할 code 또는 null",
+  "target_character_id": "대화 대상 id 또는 null",
+  "intent": "이 인물이 왜 이 행동을 하는지 짧게"
+}}
+""".strip()
+        payload = {
+            'current_location': {
+                'code': ctx.current_location,
+                'name': ctx.current_location_name,
+            },
+            'adjacent_locations': ctx.adjacent_locations,
+            'same_room_characters': ctx.same_room_characters,
+            'known_facts': ctx.known_facts,
+            'recent_memories': ctx.memories,
+            'is_detective': ctx.is_detective,
+        }
+        return await self._json_response(instructions, json.dumps(payload, ensure_ascii=False), fallback)
+
+    async def choose_detective_verdict(self, ctx: DetectiveVerdictContext) -> dict[str, Any]:
+        fallback = {
+            'accused_character_id': ctx.candidates[0]['id'] if ctx.candidates else None,
+            'reasoning': '확보한 정보만으로 가장 의심되는 인물을 지목한다.',
+        }
+        if self.client is None:
+            return fallback
+
+        instructions = f"""
+당신은 탐정 '{ctx.detective_name}'이다.
+세계관: {ctx.world_prompt}
+당신이 직접 확보한 사실과 기억만으로 최종 용의자 한 명을 지목한다.
+정답, 숨겨진 설정, 다른 인물의 비공개 기억에는 접근할 수 없다.
+후보 목록 밖 인물을 고르면 안 된다.
+반드시 JSON 객체 하나만 출력한다.
+{{
+  "accused_character_id": "후보 id",
+  "reasoning": "현재 확보한 증거와 증언에 근거한 2~4문장"
+}}
+""".strip()
+        payload = {
+            'known_facts': ctx.known_facts,
+            'memories': ctx.memories,
+            'candidates': ctx.candidates,
+        }
+        return await self._json_response(instructions, json.dumps(payload, ensure_ascii=False), fallback)
+
+    async def _json_response(
+        self,
+        instructions: str,
+        input_text: str,
+        fallback: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.client is None:
+            return fallback
+        try:
+            response = await self.client.responses.create(
+                model=self.settings.openai_model,
+                instructions=instructions,
+                input=input_text,
+                max_output_tokens=min(self.settings.openai_max_output_tokens, 320),
+            )
+            raw = (response.output_text or '').strip()
+            if raw.startswith('```'):
+                raw = raw.split('\n', 1)[1] if '\n' in raw else raw
+                raw = raw.rsplit('```', 1)[0].strip()
+            start = raw.find('{')
+            end = raw.rfind('}')
+            if start >= 0 and end > start:
+                raw = raw[start:end + 1]
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else fallback
+        except (OpenAIError, json.JSONDecodeError, TypeError, ValueError):
+            logger.exception('OpenAI structured game response failed; using fallback')
+            return fallback
+
+    def _fallback_game_action(
+        self,
+        ctx: GameMasterContext,
+        fallback: dict[str, Any],
+    ) -> dict[str, Any]:
+        text = ctx.action_text.strip()
+        if not text:
+            return {**fallback, 'allowed': False, 'reason': '행동 내용을 입력해 주세요.'}
+        separators = ['하고 ', '한 뒤', '그리고 ', '해서 ', '후에 ']
+        if any(token in text for token in separators):
+            return {
+                **fallback,
+                'allowed': False,
+                'reason': '한 번에 하나의 행동만 할 수 있습니다.',
+            }
+        lowered = text.lower()
+        for candidate in ctx.hidden_candidates:
+            terms = [str(x).lower() for x in candidate.get('interaction_terms', [])]
+            if any(term and term in lowered for term in terms):
+                return {**fallback, 'clue_code': candidate.get('code')}
+        return fallback
 
     def _fallback_reply(self, ctx: AgentContext) -> str:
         facts = [str(x) for x in (ctx.known_facts or ctx.initial_knowledge) if str(x).strip()]
