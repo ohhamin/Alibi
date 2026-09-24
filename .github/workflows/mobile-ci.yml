@@ -24,6 +24,10 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Generate modern Android project files
+        working-directory: mobile
+        run: flutter create --platforms=android --org com.ohhamin --project-name alibi .
+
       - name: Install dependencies
         working-directory: mobile
         run: flutter pub get
