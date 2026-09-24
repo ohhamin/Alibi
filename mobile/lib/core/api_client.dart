@@ -26,6 +26,8 @@ class ApiClient {
   }) =>
       _request('POST', path, body: body);
 
+  Future<Map<String, dynamic>> delete(String path) => _request('DELETE', path);
+
   Future<Map<String, dynamic>> _request(
     String method,
     String path, {
@@ -49,6 +51,8 @@ class ApiClient {
         headers: headers,
         body: jsonEncode(body ?? const <String, dynamic>{}),
       );
+    } else if (method == 'DELETE') {
+      response = await _client.delete(uri, headers: headers);
     } else {
       response = await _client.get(uri, headers: headers);
     }
