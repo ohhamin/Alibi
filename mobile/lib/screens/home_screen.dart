@@ -131,7 +131,7 @@ class _HomeScreenState extends State<HomeScreen> {
       body: RefreshIndicator(
         onRefresh: _load,
         child: _loading
-            ? const ListView(children: [SizedBox(height: 260), Center(child: CircularProgressIndicator())])
+            ? ListView(children: const [SizedBox(height: 260), Center(child: CircularProgressIndicator())])
             : _error != null
                 ? ListView(
                     padding: const EdgeInsets.all(24),
