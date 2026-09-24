@@ -422,6 +422,21 @@ class GameService:
                     culprit_id = str(solution['culprit_character_id'])
                     accused_id = str(request.culprit_character_id)
                     player_id = str(session['player_character_id']) if session['player_character_id'] else None
+
+                    await cur.execute(
+                        """
+                        select id from public.story_characters
+                        where id = %s
+                          and story_version_id = %s
+                          and is_player_selectable = true
+                        """,
+                        (accused_id, session['story_version_id']),
+                    )
+                    if await cur.fetchone() is None:
+                        raise HTTPException(status_code=400, detail='최종 지목할 수 없는 인물입니다.')
+                    if accused_id == player_id:
+                        raise HTTPException(status_code=400, detail='자기 자신은 최종 지목할 수 없습니다.')
+
                     player_is_culprit = player_id == culprit_id
                     accusation_correct = accused_id == culprit_id
 
@@ -648,6 +663,20 @@ class GameService:
         session['current_turn'] = next_round
         state['round'] = next_round
         state['actions_remaining'] = int(state.get('actions_per_round', 2))
+
+        if next_round >= 3:
+            await cur.execute(
+                """
+                insert into public.session_locations
+                  (session_id, location_code, name, description, unlocked_turn)
+                select %s, code, player_name, player_description, %s
+                from game_private.story_locations
+                where story_version_id = %s and code = 'back-alley'
+                on conflict do nothing
+                """,
+                (session['id'], next_round, session['story_version_id']),
+            )
+
         await cur.execute(
             "insert into public.game_turns (session_id, turn_no, status) values (%s, %s, 'open') returning id",
             (session['id'], next_round),
@@ -657,6 +686,11 @@ class GameService:
             cur, session['id'], new_turn_id, 'narrator', None, 'narration',
             f"라운드 {next_round}이 시작되었다. 남은 핵심 행동은 {state['actions_remaining']}회다."
         )
+        if next_round == 3:
+            await self._insert_message(
+                cur, session['id'], new_turn_id, 'narrator', None, 'system',
+                '폭우가 조금 잦아들었다. 북카페 뒤 비상문을 통해 후문 골목을 확인할 수 있게 되었다.'
+            )
 
     async def _insert_action(self, cur, client_action_id, session_id, turn_id, request, payload) -> None:
         await cur.execute(
