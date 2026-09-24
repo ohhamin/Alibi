@@ -290,3 +290,137 @@ class GameService:
                     await cur.execute(
                         """
                         select code, title, ending_text, is_success
+                        from game_private.story_endings
+                        where story_version_id = %s and code = %s
+                        """,
+                        (session['story_version_id'], session['ending_code']),
+                    )
+                    ending = await cur.fetchone()
+                    await cur.execute(
+                        """
+                        select sc.display_name as culprit_name, ss.canonical_explanation
+                        from game_private.story_solutions ss
+                        left join public.story_characters sc on sc.id = ss.culprit_character_id
+                        where ss.story_version_id = %s
+                        """,
+                        (session['story_version_id'],),
+                    )
+                    solution = await cur.fetchone()
+
+                return {
+                    'session': session,
+                    'current_turn': turn,
+                    'characters': characters,
+                    'player_role': player_role,
+                    'messages': messages,
+                    'clues': clues,
+                    'locations': locations,
+                    'ending': ending,
+                    'solution': solution,
+                }
+
+    async def perform_action(self, user_id: str, session_id: str, request: ActionRequest) -> dict[str, Any]:
+        client_action_id = str(request.client_action_id or uuid4())
+        async with pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute(
+                        "select * from public.game_sessions where id = %s and user_id = %s for update",
+                        (session_id, user_id),
+                    )
+                    session = await cur.fetchone()
+                    if session is None:
+                        raise HTTPException(status_code=404, detail='게임 세션을 찾을 수 없습니다.')
+                    if session['status'] != 'active':
+                        raise HTTPException(status_code=409, detail='이미 종료된 게임입니다.')
+                    if session['current_phase'] == 'accusation':
+                        raise HTTPException(status_code=409, detail='이제 최종 지목을 진행해야 합니다.')
+
+                    await cur.execute(
+                        "select id from public.player_actions where session_id = %s and client_action_id = %s",
+                        (session_id, client_action_id),
+                    )
+                    if await cur.fetchone():
+                        return await self.get_session_state(user_id, session_id)
+
+                    await cur.execute(
+                        """
+                        select * from public.game_turns
+                        where session_id = %s and turn_no = %s and status = 'open'
+                        for update
+                        """,
+                        (session_id, session['current_turn']),
+                    )
+                    turn = await cur.fetchone()
+                    if turn is None:
+                        raise HTTPException(status_code=409, detail='현재 진행 가능한 턴이 없습니다.')
+
+                    state = deepcopy(_as_dict(session['public_state']))
+                    consumed = 0
+
+                    if request.action_type == 'move':
+                        await self._handle_move(cur, session, turn, state, request, client_action_id)
+                    elif request.action_type in {'search', 'inspect'}:
+                        await self._handle_investigate(cur, session, turn, state, request, client_action_id)
+                        consumed = 1
+                    elif request.action_type == 'ask':
+                        await self._handle_ask(cur, session, turn, state, request, client_action_id)
+                        consumed = 1
+                    else:
+                        raise HTTPException(status_code=400, detail='지원하지 않는 행동입니다.')
+
+                    if consumed:
+                        remaining = max(0, int(state.get('actions_remaining', 0)) - consumed)
+                        state['actions_remaining'] = remaining
+                        if remaining == 0:
+                            await self._advance_round(cur, session, turn, state)
+
+                    await cur.execute(
+                        """
+                        update public.game_sessions
+                        set public_state = %s, current_turn = %s, current_phase = %s,
+                            last_saved_at = now(), updated_at = now()
+                        where id = %s
+                        """,
+                        (Jsonb(state), session['current_turn'], session['current_phase'], session_id),
+                    )
+                    await cur.execute(
+                        """
+                        update game_private.session_runtime
+                        set current_scene = %s, state = %s, state_version = state_version + 1, updated_at = now()
+                        where session_id = %s
+                        """,
+                        (state.get('current_location'), Jsonb(state), session_id),
+                    )
+
+        return await self.get_session_state(user_id, session_id)
+
+    async def accuse(self, user_id: str, session_id: str, request: AccuseRequest) -> dict[str, Any]:
+        async with pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute(
+                        "select * from public.game_sessions where id = %s and user_id = %s for update",
+                        (session_id, user_id),
+                    )
+                    session = await cur.fetchone()
+                    if session is None:
+                        raise HTTPException(status_code=404, detail='게임 세션을 찾을 수 없습니다.')
+                    if session['status'] != 'active':
+                        raise HTTPException(status_code=409, detail='이미 종료된 게임입니다.')
+                    if session['current_phase'] != 'accusation':
+                        raise HTTPException(status_code=409, detail='아직 최종 지목 단계가 아닙니다.')
+
+                    await cur.execute(
+                        "select culprit_character_id from game_private.story_solutions where story_version_id = %s",
+                        (session['story_version_id'],),
+                    )
+                    solution = await cur.fetchone()
+                    if solution is None or solution['culprit_character_id'] is None:
+                        raise HTTPException(status_code=500, detail='정답 데이터가 없습니다.')
+
+                    culprit_id = str(solution['culprit_character_id'])
+                    accused_id = str(request.culprit_character_id)
+                    player_id = str(session['player_character_id']) if session['player_character_id'] else None
+                    player_is_culprit = player_id == culprit_id
+                    accusation_correct = accused_id == culprit_id
