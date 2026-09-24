@@ -762,7 +762,7 @@ class GameService:
 
         await cur.execute(
             """
-            select sc.id, sc.display_name, sc.role_label
+            select sc.id, sc.code, sc.display_name, sc.role_label
             from game_private.session_character_states st
             join public.story_characters sc on sc.id = st.character_id
             where st.session_id = %s
@@ -817,7 +817,12 @@ class GameService:
         clue_rows = list(await cur.fetchall())
         hidden_candidates: list[dict[str, Any]] = []
         clue_map: dict[str, dict[str, Any]] = {}
+        same_room_codes = {str(row.get('code') or '') for row in same_room}
         for clue in clue_rows:
+            reveal_rule = _as_dict(clue['reveal_rule'])
+            required_character = str(reveal_rule.get('character') or '').strip()
+            if required_character and required_character not in same_room_codes:
+                continue
             metadata = _as_dict(clue['metadata'])
             terms = _as_list(metadata.get('interaction_terms'))
             if not terms:
@@ -1351,12 +1356,18 @@ class GameService:
 
             await cur.execute(
                 """
-                select code, player_name
-                from game_private.story_locations
-                where story_version_id = %s and code = any(%s)
-                order by player_name
+                select l.code, l.player_name
+                from game_private.story_locations l
+                join public.session_locations sl
+                  on sl.session_id = %s and sl.location_code = l.code
+                where l.story_version_id = %s and l.code = any(%s)
+                order by l.player_name
                 """,
-                (session['story_version_id'], adjacent_codes or ['__none__']),
+                (
+                    session['id'],
+                    session['story_version_id'],
+                    adjacent_codes or ['__none__'],
+                ),
             )
             adjacent_locations = list(await cur.fetchall())
 
@@ -1545,6 +1556,17 @@ class GameService:
             where c.story_version_id = %s
               and l.code = %s
               and coalesce((c.reveal_rule->>'min_round')::int, 1) <= %s
+              and (
+                c.reveal_rule->>'character' is null
+                or exists (
+                  select 1
+                  from game_private.session_character_states st2
+                  join public.story_characters sc2 on sc2.id = st2.character_id
+                  where st2.session_id = %s
+                    and st2.location_code = %s
+                    and sc2.code = c.reveal_rule->>'character'
+                )
+              )
               and not exists (
                 select 1 from game_private.internal_events ie
                 where ie.session_id = %s
@@ -1564,6 +1586,8 @@ class GameService:
                 session['story_version_id'],
                 location_code,
                 session['current_turn'],
+                session['id'],
+                location_code,
                 session['id'],
                 session['id'],
                 actor['id'],
