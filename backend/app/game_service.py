@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 from .agent_service import (
     AgentContext,
     AgentService,
+    DetectiveBonusContext,
     DetectiveVerdictContext,
     GameMasterContext,
     NpcActionContext,
@@ -79,6 +80,19 @@ class GameService:
                 await cur.execute(query, (user_id,))
                 return list(await cur.fetchall())
 
+    async def delete_session(self, user_id: str, session_id: str) -> dict[str, bool]:
+        async with pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute(
+                        "delete from public.game_sessions where id = %s and user_id = %s returning id",
+                        (session_id, user_id),
+                    )
+                    deleted = await cur.fetchone()
+                    if deleted is None:
+                        raise HTTPException(status_code=404, detail='삭제할 저장 게임을 찾을 수 없습니다.')
+        return {'deleted': True}
+
     async def start_session(self, user_id: str, request: StartSessionRequest) -> dict[str, Any]:
         async with pool.connection() as conn:
             async with conn.transaction():
@@ -124,11 +138,15 @@ class GameService:
                     state = deepcopy(_as_dict(story['initial_state']))
                     rules = _as_dict(story['turn_rules'])
                     state['round'] = 1
-                    state['actions_per_round'] = int(rules.get('actions_per_round', 2))
-                    state['actions_remaining'] = int(rules.get('actions_per_round', 2))
+                    state['actions_per_round'] = 1
+                    state['actions_remaining'] = 0
                     state['max_rounds'] = int(rules.get('max_rounds', story['max_turns'] or 6))
                     state['current_location'] = starting_location['code']
                     state['current_location_name'] = starting_location['player_name']
+                    state['inventory_clues'] = []
+                    state['world_changes'] = []
+                    state['pending_npc_question'] = None
+                    state['detective_bonus_done_round'] = 0
 
                     await cur.execute(
                         """
@@ -150,6 +168,7 @@ class GameService:
                         (session_id,),
                     )
                     turn_id = (await cur.fetchone())['id']
+                    turn = {'id': turn_id, 'turn_no': 1, 'status': 'open'}
 
                     await cur.execute(
                         """
@@ -210,34 +229,43 @@ class GameService:
 
                     await cur.execute(
                         """
+                        select sc.id, sc.display_name, sc.role_label, sc.sort_order
+                        from public.story_characters sc
+                        where sc.story_version_id = %s
+                        order by sc.sort_order
+                        """,
+                        (str(request.story_version_id),),
+                    )
+                    ordered = list(await cur.fetchall())
+                    state['actor_order'] = [str(row['id']) for row in ordered]
+                    state['turn_order'] = [
+                        {
+                            'id': str(row['id']),
+                            'name': row['display_name'],
+                            'role': row['role_label'],
+                            'sort_order': row['sort_order'],
+                        }
+                        for row in ordered
+                    ]
+                    state['actor_index'] = 0
+
+                    await cur.execute(
+                        """
                         select sc.id, st.location_code
                         from game_private.session_character_states st
                         join public.story_characters sc on sc.id = st.character_id
                         where st.session_id = %s
-                          and st.location_code = %s
-                          and sc.id <> %s
                         """,
-                        (session_id, starting_location['code'], str(request.player_character_id)),
+                        (session_id,),
                     )
                     state['known_character_locations'] = {
                         str(row['id']): {
                             'location_code': row['location_code'],
                             'turn_no': 1,
-                            'source': 'seen',
+                            'source': 'cctv',
                         }
                         for row in await cur.fetchall()
                     }
-                    state['inventory_clues'] = []
-                    state['world_changes'] = []
-
-                    await cur.execute(
-                        "update public.game_sessions set public_state = %s where id = %s",
-                        (Jsonb(state), session_id),
-                    )
-                    await cur.execute(
-                        "update game_private.session_runtime set state = %s where session_id = %s",
-                        (Jsonb(state), session_id),
-                    )
 
                     opening = story['opening_text'] or f"{story['title']} 사건이 시작되었습니다."
                     await self._insert_message(cur, session_id, turn_id, 'narrator', None, 'narration', opening)
@@ -248,7 +276,38 @@ class GameService:
                         'system',
                         None,
                         'system',
-                        f"당신은 {player['display_name']}({player['role_label']})입니다. 라운드당 핵심 행동은 {state['actions_per_round']}회입니다.",
+                        (
+                            f"당신은 {player['display_name']}({player['role_label']})입니다. "
+                            "모든 인물은 위에서부터 한 번씩 행동하며, 당신 차례에는 행동 1회를 할 수 있습니다."
+                        ),
+                    )
+
+                    session = {
+                        'id': session_id,
+                        'story_version_id': str(request.story_version_id),
+                        'player_character_id': str(request.player_character_id),
+                        'current_turn': 1,
+                        'current_phase': 'investigation',
+                        'status': 'active',
+                    }
+                    await self._advance_turn_sequence(cur, session, turn, state)
+
+                    await cur.execute(
+                        """
+                        update public.game_sessions
+                        set public_state = %s, current_turn = %s, current_phase = %s,
+                            last_saved_at = now(), updated_at = now()
+                        where id = %s
+                        """,
+                        (Jsonb(state), session['current_turn'], session['current_phase'], session_id),
+                    )
+                    await cur.execute(
+                        """
+                        update game_private.session_runtime
+                        set current_scene = %s, state = %s, state_version = state_version + 1, updated_at = now()
+                        where session_id = %s
+                        """,
+                        (state.get('current_location'), Jsonb(state), session_id),
                     )
 
         return await self.get_session_state(user_id, str(session_id))
@@ -272,11 +331,12 @@ class GameService:
 
                 await cur.execute(
                     """
-                    select id, code, display_name, role_label, public_bio, avatar_url,
-                           is_player_selectable, sort_order
-                    from public.story_characters
-                    where story_version_id = %s
-                    order by sort_order
+                    select sc.id, sc.code, sc.display_name, sc.role_label, sc.public_bio, sc.avatar_url,
+                           sc.is_player_selectable, sc.sort_order, cc.personality
+                    from public.story_characters sc
+                    join game_private.character_configs cc on cc.character_id = sc.id
+                    where sc.story_version_id = %s
+                    order by sc.sort_order
                     """,
                     (session['story_version_id'],),
                 )
@@ -287,7 +347,7 @@ class GameService:
                     await cur.execute(
                         """
                         select sc.id, sc.display_name, sc.role_label, sc.public_bio,
-                               cc.private_backstory, cc.objective, cc.secrets
+                               cc.private_backstory, cc.objective, cc.secrets, cc.personality
                         from public.story_characters sc
                         join game_private.character_configs cc on cc.character_id = sc.id
                         where sc.id = %s
@@ -322,11 +382,16 @@ class GameService:
 
                 await cur.execute(
                     """
-                    select id, location_code, name, description, unlocked_turn, unlocked_at
-                    from public.session_locations where session_id = %s
-                    order by unlocked_at, id
+                    select sl.id, sl.location_code, sl.name, sl.description,
+                           sl.unlocked_turn, sl.unlocked_at,
+                           coalesce(l.metadata->'adjacent', '[]'::jsonb) as adjacent
+                    from public.session_locations sl
+                    join game_private.story_locations l
+                      on l.story_version_id = %s and l.code = sl.location_code
+                    where sl.session_id = %s
+                    order by sl.unlocked_at, sl.id
                     """,
-                    (session_id,),
+                    (session['story_version_id'], session_id),
                 )
                 locations = list(await cur.fetchall())
 
@@ -374,18 +439,17 @@ class GameService:
                     from game_private.session_character_states st
                     join public.story_characters sc on sc.id = st.character_id
                     where st.session_id = %s
-                      and st.location_code = %s
-                      and (%s is null or sc.id <> %s)
                     order by sc.sort_order
                     """,
-                    (
-                        session_id,
-                        current_location,
-                        session['player_character_id'],
-                        session['player_character_id'],
-                    ),
+                    (session_id,),
                 )
-                visible_characters = list(await cur.fetchall())
+                character_locations = list(await cur.fetchall())
+                visible_characters = [
+                    row
+                    for row in character_locations
+                    if row['location_code'] == current_location
+                    and str(row['id']) != str(session['player_character_id'])
+                ]
 
                 current_location_detail = next(
                     (item for item in locations if item['location_code'] == current_location),
@@ -402,7 +466,11 @@ class GameService:
                     'locations': locations,
                     'current_location_detail': current_location_detail,
                     'visible_characters': visible_characters,
+                    'character_locations': character_locations,
                     'known_character_locations': _as_dict(state.get('known_character_locations')),
+                    'pending_npc_question': state.get('pending_npc_question'),
+                    'current_actor_id': state.get('current_actor_id'),
+                    'current_actor_name': state.get('current_actor_name'),
                     'ending': ending,
                     'solution': solution,
                 }
@@ -421,8 +489,6 @@ class GameService:
                         raise HTTPException(status_code=404, detail='게임 세션을 찾을 수 없습니다.')
                     if session['status'] != 'active':
                         raise HTTPException(status_code=409, detail='이미 종료된 게임입니다.')
-                    if session['current_phase'] == 'accusation':
-                        raise HTTPException(status_code=409, detail='이제 최종 지목을 진행해야 합니다.')
 
                     await cur.execute(
                         "select id from public.player_actions where session_id = %s and client_action_id = %s",
@@ -444,53 +510,76 @@ class GameService:
                         raise HTTPException(status_code=409, detail='현재 진행 가능한 턴이 없습니다.')
 
                     state = deepcopy(_as_dict(session['public_state']))
-                    consumed = False
+                    await self._ensure_turn_order(cur, session, state)
 
-                    if request.action_type == 'move':
-                        consumed = await self._handle_move(
-                            cur, session, turn, state, request, client_action_id
+                    pending = _as_dict(state.get('pending_npc_question'))
+                    if pending:
+                        if request.action_type != 'reply':
+                            raise HTTPException(
+                                status_code=409,
+                                detail=f"{pending.get('actor_name', '인물')}의 질문에 먼저 답해야 합니다.",
+                            )
+                        await self._handle_reply(
+                            cur, session, turn, state, request, client_action_id, pending
                         )
-                    elif request.action_type == 'act':
-                        consumed = await self._handle_free_action(
-                            cur,
-                            session,
-                            turn,
-                            state,
-                            request,
-                            client_action_id,
-                            action_text=(request.input_text or '').strip(),
-                        )
-                    elif request.action_type in {'search', 'inspect'}:
-                        legacy_text = (
-                            (request.input_text or '').strip()
-                            or ('주변을 꼼꼼히 살펴본다.' if request.action_type == 'search'
-                                else '눈에 보이는 것을 자세히 조사한다.')
-                        )
-                        consumed = await self._handle_free_action(
-                            cur,
-                            session,
-                            turn,
-                            state,
-                            request,
-                            client_action_id,
-                            action_text=legacy_text,
-                        )
-                    elif request.action_type == 'ask':
-                        consumed = await self._handle_ask(
-                            cur, session, turn, state, request, client_action_id
-                        )
-                    elif request.action_type == 'present':
-                        consumed = await self._handle_present(
-                            cur, session, turn, state, request, client_action_id
-                        )
+                        await self._advance_turn_sequence(cur, session, turn, state)
                     else:
-                        raise HTTPException(status_code=400, detail='지원하지 않는 행동입니다.')
+                        if str(state.get('current_actor_id') or '') != str(session['player_character_id']):
+                            await self._advance_turn_sequence(cur, session, turn, state)
+                        if _as_dict(state.get('pending_npc_question')):
+                            pass
+                        elif str(state.get('current_actor_id') or '') != str(session['player_character_id']):
+                            raise HTTPException(status_code=409, detail='아직 당신의 차례가 아닙니다.')
+                        else:
+                            consumed = False
+                            if request.action_type == 'move':
+                                consumed = await self._handle_move(
+                                    cur, session, turn, state, request, client_action_id
+                                )
+                            elif request.action_type == 'act':
+                                consumed = await self._handle_free_action(
+                                    cur,
+                                    session,
+                                    turn,
+                                    state,
+                                    request,
+                                    client_action_id,
+                                    action_text=(request.input_text or '').strip(),
+                                )
+                            elif request.action_type in {'search', 'inspect'}:
+                                legacy_text = (
+                                    (request.input_text or '').strip()
+                                    or ('주변을 꼼꼼히 살펴본다.' if request.action_type == 'search'
+                                        else '눈에 보이는 것을 자세히 조사한다.')
+                                )
+                                consumed = await self._handle_free_action(
+                                    cur,
+                                    session,
+                                    turn,
+                                    state,
+                                    request,
+                                    client_action_id,
+                                    action_text=legacy_text,
+                                )
+                            elif request.action_type == 'ask':
+                                consumed = await self._handle_ask(
+                                    cur, session, turn, state, request, client_action_id
+                                )
+                            elif request.action_type == 'present':
+                                consumed = await self._handle_present(
+                                    cur, session, turn, state, request, client_action_id
+                                )
+                            elif request.action_type == 'reply':
+                                raise HTTPException(status_code=409, detail='현재 답변할 질문이 없습니다.')
+                            else:
+                                raise HTTPException(status_code=400, detail='지원하지 않는 행동입니다.')
 
-                    if consumed:
-                        remaining = max(0, int(state.get('actions_remaining', 0)) - 1)
-                        state['actions_remaining'] = remaining
-                        if remaining == 0:
-                            await self._advance_round(cur, session, turn, state)
+                            if consumed:
+                                state['actions_remaining'] = 0
+                                state['actor_index'] = int(state.get('actor_index', 0)) + 1
+                                state['current_actor_id'] = None
+                                state['current_actor_name'] = None
+                                await self._advance_turn_sequence(cur, session, turn, state)
 
                     await cur.execute(
                         """
@@ -513,104 +602,10 @@ class GameService:
         return await self.get_session_state(user_id, session_id)
 
     async def accuse(self, user_id: str, session_id: str, request: AccuseRequest) -> dict[str, Any]:
-        async with pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor(row_factory=dict_row) as cur:
-                    await cur.execute(
-                        "select * from public.game_sessions where id = %s and user_id = %s for update",
-                        (session_id, user_id),
-                    )
-                    session = await cur.fetchone()
-                    if session is None:
-                        raise HTTPException(status_code=404, detail='게임 세션을 찾을 수 없습니다.')
-                    if session['status'] != 'active':
-                        raise HTTPException(status_code=409, detail='이미 종료된 게임입니다.')
-                    if session['current_phase'] != 'accusation':
-                        raise HTTPException(status_code=409, detail='아직 최종 지목 단계가 아닙니다.')
-
-                    await cur.execute(
-                        "select culprit_character_id from game_private.story_solutions where story_version_id = %s",
-                        (session['story_version_id'],),
-                    )
-                    solution = await cur.fetchone()
-                    if solution is None or solution['culprit_character_id'] is None:
-                        raise HTTPException(status_code=500, detail='정답 데이터가 없습니다.')
-
-                    culprit_id = str(solution['culprit_character_id'])
-                    accused_id = str(request.culprit_character_id)
-                    player_id = str(session['player_character_id']) if session['player_character_id'] else None
-
-                    await cur.execute(
-                        """
-                        select id from public.story_characters
-                        where id = %s
-                          and story_version_id = %s
-                          and is_player_selectable = true
-                        """,
-                        (accused_id, session['story_version_id']),
-                    )
-                    if await cur.fetchone() is None:
-                        raise HTTPException(status_code=400, detail='최종 지목할 수 없는 인물입니다.')
-                    if accused_id == player_id:
-                        raise HTTPException(status_code=400, detail='자기 자신은 최종 지목할 수 없습니다.')
-
-                    player_is_culprit = player_id == culprit_id
-                    accusation_correct = accused_id == culprit_id
-
-                    if player_is_culprit:
-                        await cur.execute(
-                            "select clue_code from public.session_clues where session_id = %s",
-                            (session_id,),
-                        )
-                        clue_codes = {row['clue_code'] for row in await cur.fetchall()}
-                        core = {'clue-body-time', 'clue-bookend', 'clue-contract', 'clue-coffee-receipt'}
-                        player_accused = len(core & clue_codes) >= 3
-                        ending_code = 'culprit-caught' if player_accused else 'culprit-escape'
-                    else:
-                        ending_code = 'suspect-innocent-win' if accusation_correct else 'suspect-innocent-fail'
-
-                    await cur.execute(
-                        "select id from public.game_turns where session_id = %s order by turn_no desc limit 1",
-                        (session_id,),
-                    )
-                    turn = await cur.fetchone()
-                    turn_id = turn['id'] if turn else None
-
-                    await cur.execute(
-                        """
-                        insert into public.player_actions
-                          (client_action_id, session_id, turn_id, action_type, target_character_id, input_text, payload)
-                        values (%s, %s, %s, 'accuse', %s, %s, '{}'::jsonb)
-                        """,
-                        (str(uuid4()), session_id, turn_id, accused_id, request.reasoning),
-                    )
-
-                    await cur.execute(
-                        """
-                        select title, ending_text from game_private.story_endings
-                        where story_version_id = %s and code = %s
-                        """,
-                        (session['story_version_id'], ending_code),
-                    )
-                    ending = await cur.fetchone()
-                    if ending is None:
-                        raise HTTPException(status_code=500, detail='엔딩 데이터를 찾을 수 없습니다.')
-
-                    await self._insert_message(
-                        cur, session_id, turn_id, 'narrator', None, 'narration',
-                        f"{ending['title']}\n{ending['ending_text']}"
-                    )
-                    await cur.execute(
-                        """
-                        update public.game_sessions
-                        set status = 'completed', current_phase = 'completed', ending_code = %s,
-                            completed_at = now(), last_saved_at = now(), updated_at = now()
-                        where id = %s
-                        """,
-                        (ending_code, session_id),
-                    )
-
-        return await self.get_session_state(user_id, session_id)
+        raise HTTPException(
+            status_code=409,
+            detail='최종 범인 지목은 수사 종료 시 AI 탐정이 수행합니다.',
+        )
 
     async def _handle_move(self, cur, session, turn, state, request, client_action_id: str) -> bool:
         location_code = str(request.payload.get('location_code') or '').strip()
@@ -1233,35 +1228,32 @@ class GameService:
         return True
 
     async def _advance_round(self, cur, session, turn, state) -> None:
-        await self._run_npc_turns(cur, session, turn, state)
+        current_round = int(session['current_turn'])
+
+        if int(state.get('detective_bonus_done_round', 0)) != current_round:
+            await self._detective_bonus_action(cur, session, turn, state)
+            state['detective_bonus_done_round'] = current_round
+            if _as_dict(state.get('pending_npc_question')):
+                return
 
         await cur.execute(
             "update public.game_turns set status = 'resolved', closed_at = now() where id = %s",
             (turn['id'],),
         )
-        current_round = int(session['current_turn'])
+
         max_rounds = int(state.get('max_rounds', 6))
         if current_round >= max_rounds:
-            if await self._player_is_culprit(cur, session):
-                await self._resolve_detective_verdict(cur, session, turn, state)
-            else:
-                session['current_phase'] = 'accusation'
-                state['actions_remaining'] = 0
-                await self._insert_message(
-                    cur,
-                    session['id'],
-                    turn['id'],
-                    'narrator',
-                    None,
-                    'narration',
-                    '수사 시간이 끝났다. 이제 확보한 정보로 최종 지목을 해야 한다.',
-                )
+            await self._resolve_detective_verdict(cur, session, turn, state)
             return
 
         next_round = current_round + 1
         session['current_turn'] = next_round
         state['round'] = next_round
-        state['actions_remaining'] = int(state.get('actions_per_round', 2))
+        state['actor_index'] = 0
+        state['actions_remaining'] = 0
+        state['current_actor_id'] = None
+        state['current_actor_name'] = None
+        state['pending_npc_question'] = None
 
         if next_round >= 3:
             await cur.execute(
@@ -1281,6 +1273,9 @@ class GameService:
             (session['id'], next_round),
         )
         new_turn_id = (await cur.fetchone())['id']
+        turn['id'] = new_turn_id
+        turn['turn_no'] = next_round
+        turn['status'] = 'open'
         await self._insert_message(
             cur,
             session['id'],
@@ -1288,7 +1283,7 @@ class GameService:
             'narrator',
             None,
             'narration',
-            f"라운드 {next_round}이 시작되었다. 행동은 {state['actions_remaining']}회다.",
+            f"라운드 {next_round}이 시작되었다. 인물들이 순서대로 행동한다.",
         )
         if next_round == 3:
             await self._insert_message(
@@ -1303,233 +1298,668 @@ class GameService:
         await self._refresh_known_locations(cur, session, state)
 
     async def _run_npc_turns(self, cur, session, turn, state) -> None:
+        await self._advance_turn_sequence(cur, session, turn, state)
+
+    async def _ensure_turn_order(self, cur, session, state) -> None:
+        order = _as_list(state.get('actor_order'))
+        if order:
+            return
         await cur.execute(
             """
-            select rc.world_prompt
-            from game_private.story_runtime_configs rc
-            where rc.story_version_id = %s
+            select id, display_name, role_label, sort_order
+            from public.story_characters
+            where story_version_id = %s
+            order by sort_order
             """,
             (session['story_version_id'],),
         )
-        runtime = await cur.fetchone()
-        world_prompt = runtime['world_prompt'] if runtime else ''
+        rows = list(await cur.fetchall())
+        state['actor_order'] = [str(row['id']) for row in rows]
+        state['turn_order'] = [
+            {
+                'id': str(row['id']),
+                'name': row['display_name'],
+                'role': row['role_label'],
+                'sort_order': row['sort_order'],
+            }
+            for row in rows
+        ]
+        player_id = str(session['player_character_id']) if session['player_character_id'] else ''
+        state['actor_index'] = next(
+            (idx for idx, value in enumerate(state['actor_order']) if value == player_id),
+            0,
+        )
+        state['actions_per_round'] = 1
+        state['actions_remaining'] = 1
+        state['pending_npc_question'] = None
+        state['detective_bonus_done_round'] = int(state.get('detective_bonus_done_round', 0))
 
+    async def _advance_turn_sequence(self, cur, session, turn, state) -> None:
+        await self._ensure_turn_order(cur, session, state)
+        safety = 0
+        while session.get('status', 'active') == 'active':
+            safety += 1
+            if safety > 20:
+                raise HTTPException(status_code=500, detail='턴 진행 안전 한도를 초과했습니다.')
+
+            if _as_dict(state.get('pending_npc_question')):
+                return
+
+            order = [str(value) for value in _as_list(state.get('actor_order'))]
+            index = int(state.get('actor_index', 0))
+            if index >= len(order):
+                await self._advance_round(cur, session, turn, state)
+                if session.get('status') != 'active' or _as_dict(state.get('pending_npc_question')):
+                    return
+                continue
+
+            actor_id = order[index]
+            turn_info = next(
+                (
+                    row for row in _as_list(state.get('turn_order'))
+                    if str(_as_dict(row).get('id') or '') == actor_id
+                ),
+                {},
+            )
+            state['current_actor_id'] = actor_id
+            state['current_actor_name'] = _as_dict(turn_info).get('name')
+
+            if actor_id == str(session['player_character_id']):
+                state['actions_remaining'] = 1
+                return
+
+            await self._run_single_npc_turn(cur, session, turn, state, actor_id)
+            state['actor_index'] = index + 1
+            state['actions_remaining'] = 0
+            if _as_dict(state.get('pending_npc_question')):
+                return
+
+    async def _run_single_npc_turn(self, cur, session, turn, state, actor_id: str) -> None:
         await cur.execute(
             """
             select sc.id, sc.display_name, sc.role_label, sc.code,
-                   cc.system_prompt, cc.objective,
-                   st.location_code, st.known_facts
+                   cc.system_prompt, cc.objective, cc.personality,
+                   st.location_code, st.known_facts,
+                   rc.world_prompt
             from public.story_characters sc
             join game_private.character_configs cc on cc.character_id = sc.id
             join game_private.session_character_states st
               on st.session_id = %s and st.character_id = sc.id
-            where sc.story_version_id = %s
-              and (%s is null or sc.id <> %s)
-            order by sc.sort_order
+            join game_private.story_runtime_configs rc on rc.story_version_id = sc.story_version_id
+            where sc.id = %s and sc.story_version_id = %s
+            """,
+            (session['id'], actor_id, session['story_version_id']),
+        )
+        actor = await cur.fetchone()
+        if actor is None or not actor['location_code']:
+            return
+
+        current_code = actor['location_code']
+        await cur.execute(
+            """
+            select player_name, metadata
+            from game_private.story_locations
+            where story_version_id = %s and code = %s
+            """,
+            (session['story_version_id'], current_code),
+        )
+        loc = await cur.fetchone()
+        if loc is None:
+            return
+        adjacent_codes = _as_list(_as_dict(loc['metadata']).get('adjacent'))
+
+        await cur.execute(
+            """
+            select l.code, l.player_name
+            from game_private.story_locations l
+            join public.session_locations sl
+              on sl.session_id = %s and sl.location_code = l.code
+            where l.story_version_id = %s and l.code = any(%s)
+            order by l.player_name
             """,
             (
                 session['id'],
                 session['story_version_id'],
-                session['player_character_id'],
-                session['player_character_id'],
+                adjacent_codes or ['__none__'],
             ),
         )
-        actors = list(await cur.fetchall())
+        adjacent_locations = list(await cur.fetchall())
 
-        for actor in actors:
-            current_code = actor['location_code']
-            if not current_code:
-                continue
+        await cur.execute(
+            """
+            select sc.id, sc.code, sc.display_name, sc.role_label
+            from game_private.session_character_states st
+            join public.story_characters sc on sc.id = st.character_id
+            where st.session_id = %s
+              and st.location_code = %s
+              and sc.id <> %s
+            order by sc.sort_order
+            """,
+            (session['id'], current_code, actor['id']),
+        )
+        same_room = list(await cur.fetchall())
 
-            await cur.execute(
-                """
-                select player_name, metadata
-                from game_private.story_locations
-                where story_version_id = %s and code = %s
-                """,
-                (session['story_version_id'], current_code),
+        await cur.execute(
+            """
+            select content
+            from game_private.agent_memories
+            where session_id = %s and character_id = %s
+            order by created_at desc
+            limit 10
+            """,
+            (session['id'], actor['id']),
+        )
+        memories = [row['content'] for row in await cur.fetchall()]
+        memories.reverse()
+
+        is_detective = actor['role_label'] == '탐정' or actor['code'] == 'kang-haejin'
+        choice = await self.agent_service.choose_npc_action(
+            NpcActionContext(
+                world_prompt=actor['world_prompt'],
+                character_id=str(actor['id']),
+                character_name=actor['display_name'],
+                system_prompt=actor['system_prompt'],
+                objective=actor['objective'],
+                personality=_as_dict(actor['personality']),
+                current_location=current_code,
+                current_location_name=loc['player_name'],
+                adjacent_locations=adjacent_locations,
+                same_room_characters=same_room,
+                known_facts=_as_list(actor['known_facts']),
+                memories=memories,
+                is_detective=is_detective,
             )
-            loc = await cur.fetchone()
-            if loc is None:
-                continue
-            adjacent_codes = _as_list(_as_dict(loc['metadata']).get('adjacent'))
+        )
 
-            await cur.execute(
-                """
-                select l.code, l.player_name
-                from game_private.story_locations l
-                join public.session_locations sl
-                  on sl.session_id = %s and sl.location_code = l.code
-                where l.story_version_id = %s and l.code = any(%s)
-                order by l.player_name
-                """,
-                (
-                    session['id'],
-                    session['story_version_id'],
-                    adjacent_codes or ['__none__'],
-                ),
-            )
-            adjacent_locations = list(await cur.fetchall())
+        action_type = str(choice.get('action_type') or 'observe')
+        intent = str(choice.get('intent') or '주변 상황을 살핀다.')
+        player_location = str(state.get('current_location') or '')
 
-            await cur.execute(
-                """
-                select sc.id, sc.display_name, sc.role_label
-                from game_private.session_character_states st
-                join public.story_characters sc on sc.id = st.character_id
-                where st.session_id = %s
-                  and st.location_code = %s
-                  and sc.id <> %s
-                order by sc.sort_order
-                """,
-                (session['id'], current_code, actor['id']),
-            )
-            same_room = list(await cur.fetchall())
-
-            await cur.execute(
-                """
-                select content
-                from game_private.agent_memories
-                where session_id = %s and character_id = %s
-                order by created_at desc
-                limit 8
-                """,
-                (session['id'], actor['id']),
-            )
-            memories = [row['content'] for row in await cur.fetchall()]
-            memories.reverse()
-
-            is_detective = actor['role_label'] == '탐정' or actor['code'] == 'kang-haejin'
-            choice = await self.agent_service.choose_npc_action(
-                NpcActionContext(
-                    world_prompt=world_prompt,
-                    character_id=str(actor['id']),
-                    character_name=actor['display_name'],
-                    system_prompt=actor['system_prompt'],
-                    objective=actor['objective'],
-                    current_location=current_code,
-                    current_location_name=loc['player_name'],
-                    adjacent_locations=adjacent_locations,
-                    same_room_characters=same_room,
-                    known_facts=_as_list(actor['known_facts']),
-                    memories=memories,
-                    is_detective=is_detective,
+        if action_type == 'move':
+            target_code = str(choice.get('target_location_code') or '')
+            valid_codes = {str(row['code']) for row in adjacent_locations}
+            if target_code in valid_codes:
+                await cur.execute(
+                    """
+                    update game_private.session_character_states
+                    set location_code = %s, last_turn_processed = %s, updated_at = now()
+                    where session_id = %s and character_id = %s
+                    """,
+                    (target_code, session['current_turn'], session['id'], actor['id']),
                 )
-            )
-
-            action_type = str(choice.get('action_type') or 'observe')
-            intent = str(choice.get('intent') or '주변을 살핀다.')
-
-            if action_type == 'move':
-                target_code = str(choice.get('target_location_code') or '')
-                valid_codes = {row['code'] for row in adjacent_locations}
-                if target_code not in valid_codes:
-                    action_type = 'observe'
-                else:
-                    await cur.execute(
-                        """
-                        update game_private.session_character_states
-                        set location_code = %s, last_turn_processed = %s, updated_at = now()
-                        where session_id = %s and character_id = %s
-                        """,
-                        (target_code, session['current_turn'], session['id'], actor['id']),
-                    )
-                    await cur.execute(
-                        """
-                        select player_name from game_private.story_locations
-                        where story_version_id = %s and code = %s
-                        """,
-                        (session['story_version_id'], target_code),
-                    )
-                    target_loc = await cur.fetchone()
-                    target_name = target_loc['player_name'] if target_loc else target_code
-                    await self._insert_internal_event(
-                        cur,
-                        session,
-                        'npc_move',
-                        actor_character_id=actor['id'],
-                        payload={
-                            'from': current_code,
-                            'to': target_code,
-                            'intent': intent,
-                        },
-                    )
-                    if state.get('current_location') in {current_code, target_code}:
-                        known = deepcopy(_as_dict(state.get('known_character_locations')))
-                        known[str(actor['id'])] = {
-                            'location_code': target_code,
-                            'turn_no': int(session['current_turn']),
-                            'source': 'seen',
-                        }
-                        state['known_character_locations'] = known
-                        text = (
-                            f"{actor['display_name']}이(가) {target_name} 쪽으로 이동했다."
-                            if state.get('current_location') == current_code
-                            else f"{actor['display_name']}이(가) {target_name}에 들어왔다."
-                        )
-                        await self._insert_message(
-                            cur, session['id'], turn['id'], 'narrator', None, 'narration', text
-                        )
-                    await self._record_npc_action_memories(
-                        cur,
-                        session,
-                        turn,
-                        actor,
-                        current_code,
-                        target_code,
-                        f"{actor['display_name']}이(가) {target_name}으로 이동했다.",
-                    )
-                    continue
-
-            if action_type == 'investigate':
-                await self._npc_investigate(cur, session, turn, state, actor, current_code, intent)
-            elif action_type == 'talk':
-                target_id = str(choice.get('target_character_id') or '')
-                valid_targets = {
-                    str(row['id'])
-                    for row in same_room
-                    if not session['player_character_id']
-                    or str(row['id']) != str(session['player_character_id'])
-                }
-                if target_id not in valid_targets:
-                    action_type = 'observe'
-                else:
-                    target = next(row for row in same_room if str(row['id']) == target_id)
-                    await self._npc_talk(
-                        cur,
-                        session,
-                        turn,
-                        state,
-                        actor,
-                        target,
-                        current_code,
-                        intent,
-                    )
-                    continue
-
-            if action_type == 'observe':
-                content = f"{actor['display_name']}이(가) {loc['player_name']}에서 주변 상황을 살폈다."
+                target_loc = next(
+                    (row for row in adjacent_locations if str(row['code']) == target_code),
+                    None,
+                )
+                target_name = target_loc['player_name'] if target_loc else target_code
+                exact = f"{actor['display_name']}이(가) {loc['player_name']}에서 {target_name}(으)로 이동했다."
                 await self._insert_internal_event(
                     cur,
                     session,
-                    'npc_observe',
+                    'npc_move',
                     actor_character_id=actor['id'],
-                    payload={'location_code': current_code, 'intent': intent},
+                    payload={'from': current_code, 'to': target_code, 'intent': intent},
                 )
-                await self._remember(
+                await self._insert_message(
                     cur,
                     session['id'],
-                    actor['id'],
                     turn['id'],
-                    'observation',
-                    content,
-                    f"npc-observe:{session['current_turn']}:{actor['id']}",
+                    'narrator',
+                    None,
+                    'narration',
+                    exact if player_location in {current_code, target_code}
+                    else f"{actor['display_name']}이(가) 행동을 했다.",
                 )
-                if state.get('current_location') == current_code:
-                    await self._insert_message(
-                        cur, session['id'], turn['id'], 'narrator', None, 'narration', content
-                    )
+                await self._record_npc_action_memories(
+                    cur, session, turn, actor, current_code, target_code, exact
+                )
+                return
+            action_type = 'observe'
 
-        await self._refresh_known_locations(cur, session, state)
+        if action_type == 'investigate':
+            await self._npc_investigate(cur, session, turn, state, actor, current_code, intent)
+            return
+
+        if action_type == 'talk':
+            target_id = str(choice.get('target_character_id') or '')
+            valid_targets = {str(row['id']) for row in same_room}
+            if target_id in valid_targets:
+                target = next(row for row in same_room if str(row['id']) == target_id)
+                if target_id == str(session['player_character_id']):
+                    question = str(choice.get('question') or '').strip()
+                    if not question:
+                        question = f"{intent} 지금 알고 있는 걸 솔직히 말해줄래?"
+                    await self._insert_internal_event(
+                        cur,
+                        session,
+                        'npc_asks_player',
+                        actor_character_id=actor['id'],
+                        target_character_id=target_id,
+                        payload={'location_code': current_code, 'question': question, 'intent': intent},
+                    )
+                    await self._insert_message(
+                        cur,
+                        session['id'],
+                        turn['id'],
+                        'character',
+                        actor['id'],
+                        'dialogue',
+                        question,
+                    )
+                    state['pending_npc_question'] = {
+                        'actor_id': str(actor['id']),
+                        'actor_name': actor['display_name'],
+                        'question': question,
+                        'source': 'actor_turn',
+                        'location_code': current_code,
+                    }
+                    await self._record_witnesses(
+                        cur,
+                        session,
+                        turn,
+                        current_code,
+                        f"{actor['display_name']}이(가) 플레이어에게 '{question}'라고 물었다.",
+                        source_key=f"npc-question:{session['current_turn']}:{actor['id']}",
+                        exclude_ids={str(actor['id'])},
+                    )
+                    return
+
+                await self._npc_talk(
+                    cur, session, turn, state, actor, target, current_code, intent
+                )
+                return
+            action_type = 'observe'
+
+        content = f"{actor['display_name']}이(가) {loc['player_name']}에서 주변 상황을 살폈다."
+        await self._insert_internal_event(
+            cur,
+            session,
+            'npc_observe',
+            actor_character_id=actor['id'],
+            payload={'location_code': current_code, 'intent': intent},
+        )
+        await self._remember(
+            cur,
+            session['id'],
+            actor['id'],
+            turn['id'],
+            'observation',
+            content,
+            f"npc-observe:{session['current_turn']}:{actor['id']}",
+        )
+        await self._insert_message(
+            cur,
+            session['id'],
+            turn['id'],
+            'narrator',
+            None,
+            'narration',
+            content if player_location == current_code
+            else f"{actor['display_name']}이(가) 행동을 했다.",
+        )
+
+    async def _handle_reply(
+        self,
+        cur,
+        session,
+        turn,
+        state,
+        request,
+        client_action_id: str,
+        pending: dict[str, Any],
+    ) -> None:
+        reply = (request.input_text or '').strip()
+        if not reply:
+            raise HTTPException(status_code=400, detail='답변 내용을 입력해 주세요.')
+
+        await self._insert_action(
+            cur,
+            client_action_id,
+            session['id'],
+            turn['id'],
+            request,
+            payload={'reply_to': pending.get('actor_id'), 'source': pending.get('source')},
+        )
+        await self._insert_message(
+            cur,
+            session['id'],
+            turn['id'],
+            'player',
+            session['player_character_id'],
+            'dialogue',
+            reply,
+        )
+
+        actor_id = str(pending.get('actor_id') or '')
+        actor_name = str(pending.get('actor_name') or '인물')
+        question = str(pending.get('question') or '')
+        if actor_id:
+            await self._remember(
+                cur,
+                session['id'],
+                actor_id,
+                turn['id'],
+                'testimony',
+                f"플레이어에게 '{question}'라고 물었고 '{reply}'라고 답했다.",
+                f"player-reply:{session['current_turn']}:{client_action_id}",
+                salience=85,
+            )
+
+        location_code = str(pending.get('location_code') or state.get('current_location') or '')
+        if pending.get('source') == 'detective_bonus':
+            public_text = f"공개 추가 수사에서 플레이어가 '{reply}'라고 답했다."
+            await self._broadcast_memory(
+                cur,
+                session,
+                turn,
+                public_text,
+                source_key=f"detective-public-reply:{session['current_turn']}:{client_action_id}",
+            )
+            await self._insert_message(
+                cur, session['id'], turn['id'], 'narrator', None, 'narration', public_text
+            )
+        elif location_code:
+            await self._record_witnesses(
+                cur,
+                session,
+                turn,
+                location_code,
+                f"{actor_name}의 질문에 플레이어가 '{reply}'라고 답했다.",
+                source_key=f"player-reply-witness:{session['current_turn']}:{client_action_id}",
+                exclude_ids={actor_id},
+            )
+
+        state['pending_npc_question'] = None
+
+    async def _detective_bonus_action(self, cur, session, turn, state) -> None:
+        await cur.execute(
+            """
+            select sc.id, sc.display_name, sc.code, sc.role_label,
+                   st.known_facts, cc.system_prompt, cc.personality,
+                   rc.world_prompt
+            from public.story_characters sc
+            join game_private.session_character_states st
+              on st.session_id = %s and st.character_id = sc.id
+            join game_private.character_configs cc on cc.character_id = sc.id
+            join game_private.story_runtime_configs rc on rc.story_version_id = sc.story_version_id
+            where sc.story_version_id = %s
+              and (sc.role_label = '탐정' or sc.code = 'kang-haejin')
+            order by sc.sort_order
+            limit 1
+            """,
+            (session['id'], session['story_version_id']),
+        )
+        detective = await cur.fetchone()
+        if detective is None:
+            return
+
+        await cur.execute(
+            """
+            select content from game_private.agent_memories
+            where session_id = %s and character_id = %s
+            order by created_at desc limit 15
+            """,
+            (session['id'], detective['id']),
+        )
+        memories = [row['content'] for row in await cur.fetchall()]
+        memories.reverse()
+
+        await cur.execute(
+            """
+            select id, display_name, role_label
+            from public.story_characters
+            where story_version_id = %s and id <> %s
+            order by sort_order
+            """,
+            (session['story_version_id'], detective['id']),
+        )
+        characters = list(await cur.fetchall())
+
+        await cur.execute(
+            """
+            select sl.location_code as code, sl.name
+            from public.session_locations sl
+            where sl.session_id = %s
+            order by sl.unlocked_at, sl.id
+            """,
+            (session['id'],),
+        )
+        locations = list(await cur.fetchall())
+
+        choice = await self.agent_service.choose_detective_bonus_action(
+            DetectiveBonusContext(
+                world_prompt=detective['world_prompt'],
+                detective_name=detective['display_name'],
+                known_facts=_as_list(detective['known_facts']),
+                memories=memories,
+                characters=characters,
+                locations=locations,
+            )
+        )
+        action_type = str(choice.get('action_type') or 'investigate')
+
+        if action_type == 'ask':
+            target_id = str(choice.get('target_character_id') or '')
+            valid_ids = {str(row['id']) for row in characters}
+            if target_id not in valid_ids and characters:
+                target_id = str(characters[0]['id'])
+            target = next((row for row in characters if str(row['id']) == target_id), None)
+            if target is None:
+                return
+            question = str(choice.get('question') or '').strip()
+            if not question:
+                question = '이번 사건에서 당신이 직접 본 것과 들은 것을 시간 순서대로 말해 주세요.'
+
+            if target_id == str(session['player_character_id']):
+                message = f"[탐정 추가 수사] {detective['display_name']}: {question}"
+                await self._insert_message(
+                    cur, session['id'], turn['id'], 'character', detective['id'], 'dialogue', message
+                )
+                await self._broadcast_memory(
+                    cur,
+                    session,
+                    turn,
+                    message,
+                    source_key=f"detective-bonus-question:{session['current_turn']}",
+                )
+                state['pending_npc_question'] = {
+                    'actor_id': str(detective['id']),
+                    'actor_name': detective['display_name'],
+                    'question': question,
+                    'source': 'detective_bonus',
+                    'location_code': None,
+                }
+                return
+
+            await cur.execute(
+                """
+                select sc.id, sc.display_name,
+                       cc.system_prompt, cc.private_backstory, cc.objective,
+                       cc.personality, cc.initial_knowledge, cc.secrets, cc.lie_policy,
+                       st.known_facts, st.false_beliefs, st.memory_summary,
+                       rc.world_prompt
+                from public.story_characters sc
+                join game_private.character_configs cc on cc.character_id = sc.id
+                join game_private.session_character_states st
+                  on st.session_id = %s and st.character_id = sc.id
+                join game_private.story_runtime_configs rc on rc.story_version_id = sc.story_version_id
+                where sc.id = %s and sc.story_version_id = %s
+                """,
+                (session['id'], target_id, session['story_version_id']),
+            )
+            target_ctx = await cur.fetchone()
+            if target_ctx is None:
+                return
+            await cur.execute(
+                """
+                select content from game_private.agent_memories
+                where session_id = %s and character_id = %s
+                order by created_at desc limit 10
+                """,
+                (session['id'], target_id),
+            )
+            target_memories = [row['content'] for row in await cur.fetchall()]
+            target_memories.reverse()
+            reply = await self.agent_service.generate_reply(
+                AgentContext(
+                    world_prompt=target_ctx['world_prompt'],
+                    character_name=target_ctx['display_name'],
+                    system_prompt=target_ctx['system_prompt'],
+                    private_backstory=target_ctx['private_backstory'],
+                    objective=target_ctx['objective'],
+                    personality=_as_dict(target_ctx['personality']),
+                    initial_knowledge=_as_list(target_ctx['initial_knowledge']),
+                    secrets=_as_list(target_ctx['secrets']),
+                    lie_policy=_as_dict(target_ctx['lie_policy']),
+                    known_facts=_as_list(target_ctx['known_facts']),
+                    false_beliefs=_as_list(target_ctx['false_beliefs']),
+                    memory_summary=target_ctx['memory_summary'],
+                    memories=target_memories,
+                    player_name=detective['display_name'],
+                    question=question,
+                )
+            )
+            public_text = (
+                f"[탐정 추가 수사] {detective['display_name']}이(가) "
+                f"{target_ctx['display_name']}에게 '{question}'라고 물었다. "
+                f"{target_ctx['display_name']}: {reply}"
+            )
+            await self._remember(
+                cur,
+                session['id'],
+                detective['id'],
+                turn['id'],
+                'testimony',
+                f"{target_ctx['display_name']}의 공개 진술: {reply}",
+                f"detective-bonus-testimony:{session['current_turn']}:{target_id}",
+                salience=95,
+            )
+            await self._broadcast_memory(
+                cur,
+                session,
+                turn,
+                public_text,
+                source_key=f"detective-bonus-public:{session['current_turn']}:{target_id}",
+            )
+            await self._insert_message(
+                cur, session['id'], turn['id'], 'narrator', None, 'narration', public_text
+            )
+            return
+
+        target_code = str(choice.get('target_location_code') or '')
+        valid_codes = {str(row['code']) for row in locations}
+        if target_code not in valid_codes and locations:
+            target_code = str(locations[0]['code'])
+        target_loc = next((row for row in locations if str(row['code']) == target_code), None)
+        if target_loc is None:
+            return
+
+        await cur.execute(
+            """
+            select c.code, c.player_title, c.player_text, c.category
+            from game_private.story_clues c
+            join game_private.story_locations l on l.id = c.location_id
+            where c.story_version_id = %s
+              and l.code = %s
+              and coalesce((c.reveal_rule->>'min_round')::int, 1) <= %s
+              and not exists (
+                select 1 from game_private.internal_events ie
+                where ie.session_id = %s
+                  and ie.event_type in ('clue_hidden', 'clue_taken')
+                  and ie.payload->>'clue_code' = c.code
+              )
+              and not exists (
+                select 1 from game_private.agent_memories am
+                where am.session_id = %s
+                  and am.character_id = %s
+                  and am.source_key = 'detective-bonus-clue:' || c.code
+              )
+            order by c.importance desc, c.created_at
+            limit 1
+            """,
+            (
+                session['story_version_id'],
+                target_code,
+                session['current_turn'],
+                session['id'],
+                session['id'],
+                detective['id'],
+            ),
+        )
+        clue = await cur.fetchone()
+        if clue:
+            fact = f"{clue['player_title']}: {clue['player_text']}"
+            await self._remember(
+                cur,
+                session['id'],
+                detective['id'],
+                turn['id'],
+                'clue',
+                fact,
+                f"detective-bonus-clue:{clue['code']}",
+                salience=100,
+            )
+            await cur.execute(
+                """
+                insert into public.session_clues
+                  (session_id, clue_code, title, content, category, discovered_turn)
+                values (%s, %s, %s, %s, %s, %s)
+                on conflict (session_id, clue_code) do nothing
+                """,
+                (
+                    session['id'], clue['code'], clue['player_title'],
+                    clue['player_text'], clue['category'], session['current_turn'],
+                ),
+            )
+            public_text = (
+                f"[탐정 추가 수사] {detective['display_name']}이(가) "
+                f"{target_loc['name']}을(를) 조사해 {clue['player_title']}을(를) 확인했다. "
+                f"{clue['player_text']}"
+            )
+        else:
+            public_text = (
+                f"[탐정 추가 수사] {detective['display_name']}이(가) "
+                f"{target_loc['name']}을(를) 추가 조사했지만 새로운 단서는 확인하지 못했다."
+            )
+        await self._broadcast_memory(
+            cur,
+            session,
+            turn,
+            public_text,
+            source_key=f"detective-bonus-investigate:{session['current_turn']}:{target_code}",
+        )
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'narrator', None, 'narration', public_text
+        )
+
+    async def _broadcast_memory(
+        self,
+        cur,
+        session,
+        turn,
+        content: str,
+        *,
+        source_key: str,
+    ) -> None:
+        await cur.execute(
+            """
+            select character_id
+            from game_private.session_character_states
+            where session_id = %s
+            """,
+            (session['id'],),
+        )
+        for row in await cur.fetchall():
+            await self._remember(
+                cur,
+                session['id'],
+                row['character_id'],
+                turn['id'],
+                'public_investigation',
+                content,
+                source_key,
+                salience=90,
+            )
 
     async def _npc_talk(
         self,
@@ -1648,16 +2078,16 @@ class GameService:
             exclude_ids={str(actor['id']), target_id},
         )
 
-        if state.get('current_location') == location_code:
-            await self._insert_message(
-                cur,
-                session['id'],
-                turn['id'],
-                'narrator',
-                None,
-                'narration',
-                exchange,
-            )
+        await self._insert_message(
+            cur,
+            session['id'],
+            turn['id'],
+            'narrator',
+            None,
+            'narration',
+            exchange if state.get('current_location') == location_code
+            else f"{actor['display_name']}이(가) 행동을 했다.",
+        )
 
     async def _npc_investigate(self, cur, session, turn, state, actor, location_code: str, intent: str) -> None:
         await cur.execute(
@@ -1741,10 +2171,16 @@ class GameService:
             actor_character_id=actor['id'],
             payload={'location_code': location_code, 'intent': intent, 'result': content},
         )
-        if state.get('current_location') == location_code:
-            await self._insert_message(
-                cur, session['id'], turn['id'], 'narrator', None, 'narration', content
-            )
+        await self._insert_message(
+            cur,
+            session['id'],
+            turn['id'],
+            'narrator',
+            None,
+            'narration',
+            content if state.get('current_location') == location_code
+            else f"{actor['display_name']}이(가) 행동을 했다.",
+        )
         await self._record_witnesses(
             cur,
             session,
@@ -1772,8 +2208,7 @@ class GameService:
         )
         detective = await cur.fetchone()
         if detective is None:
-            session['current_phase'] = 'accusation'
-            return
+            raise HTTPException(status_code=500, detail='탐정 캐릭터가 없습니다.')
 
         await cur.execute(
             """
@@ -1820,10 +2255,15 @@ class GameService:
         solution = await cur.fetchone()
         culprit_id = str(solution['culprit_character_id']) if solution and solution['culprit_character_id'] else ''
         caught = accused_id == culprit_id
-        ending_code = 'culprit-caught' if caught else 'culprit-escape'
+        player_id = str(session['player_character_id']) if session['player_character_id'] else ''
+        player_is_culprit = player_id == culprit_id
+        if player_is_culprit:
+            ending_code = 'culprit-caught' if caught else 'culprit-escape'
+        else:
+            ending_code = 'suspect-innocent-win' if caught else 'suspect-innocent-fail'
+
         reasoning = str(verdict.get('reasoning') or '').strip()
         accused_name = accused['display_name'] if accused else '알 수 없는 인물'
-
         await self._insert_message(
             cur,
             session['id'],
@@ -1831,8 +2271,29 @@ class GameService:
             'character',
             detective['id'],
             'dialogue',
-            f"제 최종 지목은 {accused_name}입니다. {reasoning}".strip(),
+            f"최종 지목은 {accused_name}입니다. {reasoning}".strip(),
         )
+
+        await cur.execute(
+            """
+            select title, ending_text
+            from game_private.story_endings
+            where story_version_id = %s and code = %s
+            """,
+            (session['story_version_id'], ending_code),
+        )
+        ending = await cur.fetchone()
+        if ending:
+            await self._insert_message(
+                cur,
+                session['id'],
+                turn['id'],
+                'narrator',
+                None,
+                'narration',
+                f"{ending['title']}\n{ending['ending_text']}",
+            )
+
         await cur.execute(
             """
             update public.game_sessions
@@ -1845,6 +2306,8 @@ class GameService:
         session['status'] = 'completed'
         session['current_phase'] = 'completed'
         state['actions_remaining'] = 0
+        state['current_actor_id'] = None
+        state['current_actor_name'] = None
 
     async def _player_is_culprit(self, cur, session) -> bool:
         if session['player_character_id'] is None:
