@@ -1,10 +1,13 @@
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAIError
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,7 +32,19 @@ class AgentContext:
 class AgentService:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.client = AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+        self.client = (
+            AsyncOpenAI(
+                api_key=settings.openai_api_key,
+                timeout=settings.openai_timeout_seconds,
+                max_retries=2,
+            )
+            if settings.openai_api_key
+            else None
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return self.client is not None
 
     async def generate_reply(self, ctx: AgentContext) -> str:
         if self.client is None:
@@ -62,13 +77,18 @@ class AgentService:
 - 괄호 안 독백이나 메타 설명을 출력하지 않는다.
 """.strip()
 
-        response = await self.client.responses.create(
-            model=self.settings.openai_model,
-            instructions=instructions,
-            input=f"{ctx.player_name}: {ctx.question}",
-        )
-        text = (response.output_text or '').strip()
-        return text or self._fallback_reply(ctx)
+        try:
+            response = await self.client.responses.create(
+                model=self.settings.openai_model,
+                instructions=instructions,
+                input=f"{ctx.player_name}: {ctx.question}",
+                max_output_tokens=self.settings.openai_max_output_tokens,
+            )
+            text = (response.output_text or '').strip()
+            return text or self._fallback_reply(ctx)
+        except OpenAIError:
+            logger.exception('OpenAI character response failed; using deterministic fallback')
+            return self._fallback_reply(ctx)
 
     def _fallback_reply(self, ctx: AgentContext) -> str:
         facts = [str(x) for x in (ctx.known_facts or ctx.initial_knowledge) if str(x).strip()]
