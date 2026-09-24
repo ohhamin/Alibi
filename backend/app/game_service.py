@@ -424,3 +424,144 @@ class GameService:
                     player_id = str(session['player_character_id']) if session['player_character_id'] else None
                     player_is_culprit = player_id == culprit_id
                     accusation_correct = accused_id == culprit_id
+
+                    if player_is_culprit:
+                        await cur.execute(
+                            "select clue_code from public.session_clues where session_id = %s",
+                            (session_id,),
+                        )
+                        clue_codes = {row['clue_code'] for row in await cur.fetchall()}
+                        core = {'clue-body-time', 'clue-bookend', 'clue-contract', 'clue-coffee-receipt'}
+                        player_accused = len(core & clue_codes) >= 3
+                        ending_code = 'culprit-caught' if player_accused else 'culprit-escape'
+                    else:
+                        ending_code = 'suspect-innocent-win' if accusation_correct else 'suspect-innocent-fail'
+
+                    await cur.execute(
+                        "select id from public.game_turns where session_id = %s order by turn_no desc limit 1",
+                        (session_id,),
+                    )
+                    turn = await cur.fetchone()
+                    turn_id = turn['id'] if turn else None
+
+                    await cur.execute(
+                        """
+                        insert into public.player_actions
+                          (client_action_id, session_id, turn_id, action_type, target_character_id, input_text, payload)
+                        values (%s, %s, %s, 'accuse', %s, %s, '{}'::jsonb)
+                        """,
+                        (str(uuid4()), session_id, turn_id, accused_id, request.reasoning),
+                    )
+
+                    await cur.execute(
+                        """
+                        select title, ending_text from game_private.story_endings
+                        where story_version_id = %s and code = %s
+                        """,
+                        (session['story_version_id'], ending_code),
+                    )
+                    ending = await cur.fetchone()
+                    if ending is None:
+                        raise HTTPException(status_code=500, detail='엔딩 데이터를 찾을 수 없습니다.')
+
+                    await self._insert_message(
+                        cur, session_id, turn_id, 'narrator', None, 'narration',
+                        f"{ending['title']}\n{ending['ending_text']}"
+                    )
+                    await cur.execute(
+                        """
+                        update public.game_sessions
+                        set status = 'completed', current_phase = 'completed', ending_code = %s,
+                            completed_at = now(), last_saved_at = now(), updated_at = now()
+                        where id = %s
+                        """,
+                        (ending_code, session_id),
+                    )
+
+        return await self.get_session_state(user_id, session_id)
+
+    async def _handle_move(self, cur, session, turn, state, request, client_action_id: str) -> None:
+        location_code = str(request.payload.get('location_code') or '').strip()
+        if not location_code:
+            raise HTTPException(status_code=400, detail='이동할 장소가 필요합니다.')
+        await cur.execute(
+            "select location_code, name from public.session_locations where session_id = %s and location_code = %s",
+            (session['id'], location_code),
+        )
+        location = await cur.fetchone()
+        if location is None:
+            raise HTTPException(status_code=400, detail='아직 갈 수 없는 장소입니다.')
+
+        await self._insert_action(cur, client_action_id, session['id'], turn['id'], request, payload=request.payload)
+        state['current_location'] = location_code
+        state['current_location_name'] = location['name']
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'narrator', None, 'choice_result',
+            f"{location['name']}으로 이동했다. 이동은 행동 횟수를 소모하지 않는다."
+        )
+
+    async def _handle_investigate(self, cur, session, turn, state, request, client_action_id: str) -> None:
+        location_code = str(request.payload.get('location_code') or state.get('current_location') or '').strip()
+        if not location_code:
+            raise HTTPException(status_code=400, detail='조사할 장소가 없습니다.')
+
+        await cur.execute(
+            "select 1 from public.session_locations where session_id = %s and location_code = %s",
+            (session['id'], location_code),
+        )
+        if await cur.fetchone() is None:
+            raise HTTPException(status_code=400, detail='아직 조사할 수 없는 장소입니다.')
+
+        await self._insert_action(cur, client_action_id, session['id'], turn['id'], request, payload={'location_code': location_code})
+        await cur.execute(
+            """
+            select c.id, c.code, c.player_title, c.player_text, c.category, c.importance
+            from game_private.story_clues c
+            join game_private.story_locations l on l.id = c.location_id
+            where c.story_version_id = %s
+              and l.code = %s
+              and coalesce(c.reveal_rule->>'action', %s) = %s
+              and coalesce((c.reveal_rule->>'min_round')::int, 1) <= %s
+              and not exists (
+                select 1 from public.session_clues sc
+                where sc.session_id = %s and sc.clue_code = c.code
+              )
+            order by c.importance desc, c.created_at
+            limit 1
+            """,
+            (session['story_version_id'], location_code, request.action_type, request.action_type, session['current_turn'], session['id']),
+        )
+        clue = await cur.fetchone()
+        if clue is None:
+            await self._insert_message(
+                cur, session['id'], turn['id'], 'narrator', None, 'choice_result',
+                '꼼꼼히 살펴봤지만 지금 새롭게 확인되는 것은 없다.'
+            )
+            return
+
+        await cur.execute(
+            """
+            insert into public.session_clues
+              (session_id, clue_code, title, content, category, discovered_turn)
+            values (%s, %s, %s, %s, %s, %s)
+            """,
+            (session['id'], clue['code'], clue['player_title'], clue['player_text'], clue['category'], session['current_turn']),
+        )
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'narrator', None, 'choice_result',
+            f"증거 발견 — {clue['player_title']}: {clue['player_text']}"
+        )
+
+    async def _handle_ask(self, cur, session, turn, state, request, client_action_id: str) -> None:
+        if request.target_character_id is None:
+            raise HTTPException(status_code=400, detail='대화할 인물을 선택하세요.')
+        question = (request.input_text or '').strip()
+        if not question:
+            raise HTTPException(status_code=400, detail='질문 내용을 입력하세요.')
+        target_id = str(request.target_character_id)
+        if session['player_character_id'] and target_id == str(session['player_character_id']):
+            raise HTTPException(status_code=400, detail='플레이어 자신의 캐릭터에게는 질문할 수 없습니다.')
+
+        await cur.execute(
+            """
+            select sc.id, sc.display_name, cc.system_prompt, cc.priv
