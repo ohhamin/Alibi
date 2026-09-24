@@ -1,0 +1,205 @@
+import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../core/api_client.dart';
+import '../models/story.dart';
+import 'game_screen.dart';
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  final _api = ApiClient();
+  bool _loading = true;
+  String? _error;
+  List<Story> _stories = const [];
+  List<Map<String, dynamic>> _sessions = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final storiesResult = await _api.get('/stories');
+      final sessionsResult = await _api.get('/sessions');
+      if (!mounted) return;
+      setState(() {
+        _stories = ((storiesResult['items'] as List?) ?? const [])
+            .map((e) => Story.fromJson(e as Map<String, dynamic>))
+            .toList();
+        _sessions = ((sessionsResult['items'] as List?) ?? const [])
+            .cast<Map<String, dynamic>>();
+      });
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _start(Story story) async {
+    final choices = story.characters.where((c) => c.isPlayerSelectable).toList();
+    final selected = await showModalBottomSheet<StoryCharacter>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('누구의 알리바이로 시작할까?', style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 8),
+              const Text('선택한 인물의 비밀과 목표를 알고 플레이합니다.'),
+              const SizedBox(height: 16),
+              ...choices.map(
+                (c) => Card(
+                  child: ListTile(
+                    title: Text(c.displayName),
+                    subtitle: Text('${c.roleLabel}\n${c.publicBio}'),
+                    isThreeLine: true,
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.pop(context, c),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+
+    try {
+      final state = await _api.post(
+        '/sessions',
+        body: {
+          'story_version_id': story.storyVersionId,
+          'player_character_id': selected.id,
+        },
+      );
+      if (!mounted) return;
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => GameScreen(initialState: state)),
+      );
+      await _load();
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
+  Future<void> _resume(String sessionId) async {
+    try {
+      final state = await _api.get('/sessions/$sessionId');
+      if (!mounted) return;
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => GameScreen(initialState: state)),
+      );
+      await _load();
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('ALIBI'),
+        actions: [
+          IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
+          IconButton(
+            onPressed: () => Supabase.instance.client.auth.signOut(),
+            icon: const Icon(Icons.logout),
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: _load,
+        child: _loading
+            ? const ListView(children: [SizedBox(height: 260), Center(child: CircularProgressIndicator())])
+            : _error != null
+                ? ListView(
+                    padding: const EdgeInsets.all(24),
+                    children: [Text(_error!), const SizedBox(height: 12), FilledButton(onPressed: _load, child: const Text('다시 시도'))],
+                  )
+                : ListView(
+                    padding: const EdgeInsets.fromLTRB(18, 8, 18, 40),
+                    children: [
+                      if (_sessions.isNotEmpty) ...[
+                        Text('이어하기', style: Theme.of(context).textTheme.titleLarge),
+                        const SizedBox(height: 10),
+                        ..._sessions.where((s) => s['status'] == 'active').map(
+                              (s) => Padding(
+                                padding: const EdgeInsets.only(bottom: 10),
+                                child: Card(
+                                  child: ListTile(
+                                    leading: const Icon(Icons.history),
+                                    title: Text(s['story_title'] as String? ?? ''),
+                                    subtitle: Text('${s['player_name'] ?? ''} · 라운드 ${s['current_turn']}'),
+                                    trailing: const Icon(Icons.play_arrow),
+                                    onTap: () => _resume(s['id'] as String),
+                                  ),
+                                ),
+                              ),
+                            ),
+                        const SizedBox(height: 24),
+                      ],
+                      Text('사건 파일', style: Theme.of(context).textTheme.titleLarge),
+                      const SizedBox(height: 10),
+                      ..._stories.map(
+                        (story) => Padding(
+                          padding: const EdgeInsets.only(bottom: 14),
+                          child: Card(
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              onTap: () => _start(story),
+                              child: Padding(
+                                padding: const EdgeInsets.all(18),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Expanded(child: Text(story.title, style: Theme.of(context).textTheme.titleLarge)),
+                                        const Icon(Icons.chevron_right),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Text(story.synopsis),
+                                    const SizedBox(height: 14),
+                                    Wrap(
+                                      spacing: 8,
+                                      children: [
+                                        Chip(label: Text('난이도 ${story.difficulty}')),
+                                        if (story.estimatedMinutes != null) Chip(label: Text('약 ${story.estimatedMinutes}분')),
+                                        Chip(label: Text('플레이 인물 ${story.characters.where((c) => c.isPlayerSelectable).length}명')),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+      ),
+    );
+  }
+}
