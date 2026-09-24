@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 backend/.venv/
 backend/.env
+backend/.env.production
 .pytest_cache/
 
 # Flutter / Dart
