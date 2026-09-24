@@ -1437,6 +1437,13 @@ class GameService:
                         },
                     )
                     if state.get('current_location') in {current_code, target_code}:
+                        known = deepcopy(_as_dict(state.get('known_character_locations')))
+                        known[str(actor['id'])] = {
+                            'location_code': target_code,
+                            'turn_no': int(session['current_turn']),
+                            'source': 'seen',
+                        }
+                        state['known_character_locations'] = known
                         text = (
                             f"{actor['display_name']}이(가) {target_name} 쪽으로 이동했다."
                             if state.get('current_location') == current_code
