@@ -142,4 +142,151 @@ class GameService:
                         values (%s, 1, 'open') returning id
                         """,
                         (session_id,),
-      
+                    )
+                    turn_id = (await cur.fetchone())['id']
+
+                    await cur.execute(
+                        """
+                        insert into game_private.session_runtime
+                          (session_id, story_version_id, current_scene, director_summary, state, state_version)
+                        values (%s, %s, %s, null, %s, 1)
+                        """,
+                        (session_id, str(request.story_version_id), starting_location['code'], Jsonb(state)),
+                    )
+
+                    await cur.execute(
+                        """
+                        insert into public.session_locations
+                          (session_id, location_code, name, description, unlocked_turn)
+                        select %s, code, player_name, player_description, 1
+                        from game_private.story_locations
+                        where story_version_id = %s and is_initially_available = true
+                        on conflict do nothing
+                        """,
+                        (session_id, str(request.story_version_id)),
+                    )
+
+                    await cur.execute(
+                        """
+                        insert into game_private.session_character_states
+                          (session_id, story_version_id, character_id, location_code, current_goal,
+                           emotional_state, suspicion_map, known_facts, false_beliefs, memory_summary, state,
+                           last_turn_processed)
+                        select %s, sc.story_version_id, sc.id, %s, cc.objective,
+                               '{}'::jsonb, '{}'::jsonb, cc.initial_knowledge, '[]'::jsonb, null, '{}'::jsonb, 0
+                        from public.story_characters sc
+                        join game_private.character_configs cc on cc.character_id = sc.id
+                        where sc.story_version_id = %s
+                        on conflict (session_id, character_id) do nothing
+                        """,
+                        (session_id, starting_location['code'], str(request.story_version_id)),
+                    )
+
+                    opening = story['opening_text'] or f"{story['title']} 사건이 시작되었습니다."
+                    await self._insert_message(cur, session_id, turn_id, 'narrator', None, 'narration', opening)
+                    await self._insert_message(
+                        cur,
+                        session_id,
+                        turn_id,
+                        'system',
+                        None,
+                        'system',
+                        f"당신은 {player['display_name']}({player['role_label']})입니다. 라운드당 핵심 행동은 {state['actions_per_round']}회입니다.",
+                    )
+
+        return await self.get_session_state(user_id, str(session_id))
+
+    async def get_session_state(self, user_id: str, session_id: str) -> dict[str, Any]:
+        async with pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    select gs.*, s.title as story_title, sv.opening_text, sv.player_briefing, sv.max_turns
+                    from public.game_sessions gs
+                    join public.story_versions sv on sv.id = gs.story_version_id
+                    join public.stories s on s.id = sv.story_id
+                    where gs.id = %s and gs.user_id = %s
+                    """,
+                    (session_id, user_id),
+                )
+                session = await cur.fetchone()
+                if session is None:
+                    raise HTTPException(status_code=404, detail='게임 세션을 찾을 수 없습니다.')
+
+                await cur.execute(
+                    """
+                    select id, code, display_name, role_label, public_bio, avatar_url,
+                           is_player_selectable, sort_order
+                    from public.story_characters
+                    where story_version_id = %s
+                    order by sort_order
+                    """,
+                    (session['story_version_id'],),
+                )
+                characters = list(await cur.fetchall())
+
+                player_role = None
+                if session['player_character_id']:
+                    await cur.execute(
+                        """
+                        select sc.id, sc.display_name, sc.role_label, sc.public_bio,
+                               cc.private_backstory, cc.objective, cc.secrets
+                        from public.story_characters sc
+                        join game_private.character_configs cc on cc.character_id = sc.id
+                        where sc.id = %s
+                        """,
+                        (session['player_character_id'],),
+                    )
+                    player_role = await cur.fetchone()
+
+                await cur.execute(
+                    """
+                    select sm.id, sm.sequence_no, sm.turn_id, sm.speaker_type,
+                           sm.speaker_character_id, sm.message_kind, sm.content, sm.created_at,
+                           sc.display_name as speaker_name
+                    from public.session_messages sm
+                    left join public.story_characters sc on sc.id = sm.speaker_character_id
+                    where sm.session_id = %s
+                    order by sm.sequence_no
+                    """,
+                    (session_id,),
+                )
+                messages = list(await cur.fetchall())
+
+                await cur.execute(
+                    """
+                    select id, clue_code, title, content, category, discovered_turn, discovered_at
+                    from public.session_clues where session_id = %s
+                    order by discovered_at, id
+                    """,
+                    (session_id,),
+                )
+                clues = list(await cur.fetchall())
+
+                await cur.execute(
+                    """
+                    select id, location_code, name, description, unlocked_turn, unlocked_at
+                    from public.session_locations where session_id = %s
+                    order by unlocked_at, id
+                    """,
+                    (session_id,),
+                )
+                locations = list(await cur.fetchall())
+
+                await cur.execute(
+                    """
+                    select id, turn_no, status, summary, opened_at, closed_at
+                    from public.game_turns
+                    where session_id = %s
+                    order by turn_no desc limit 1
+                    """,
+                    (session_id,),
+                )
+                turn = await cur.fetchone()
+
+                ending = None
+                solution = None
+                if session['status'] == 'completed' and session['ending_code']:
+                    await cur.execute(
+                        """
+                        select code, title, ending_text, is_success
