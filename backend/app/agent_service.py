@@ -155,7 +155,7 @@ class AgentService:
 JSON 형식:
 {{
   "allowed": true 또는 false,
-  "kind": "interact" | "inspect" | "hide" | "alter" | "take" | "use",
+  "kind": "interact" | "inspect" | "hide" | "alter" | "take" | "use" | "stage",
   "clue_code": "후보 code 또는 null",
   "reason": "판정 이유를 한국어 한 문장으로"
 }}
