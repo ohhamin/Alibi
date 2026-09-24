@@ -29,8 +29,6 @@ class _GameScreenState extends State<GameScreen> {
       ((_state['clues'] as List?) ?? const []).cast<Map<String, dynamic>>();
   List<Map<String, dynamic>> get _locations =>
       ((_state['locations'] as List?) ?? const []).cast<Map<String, dynamic>>();
-  List<Map<String, dynamic>> get _characters =>
-      ((_state['characters'] as List?) ?? const []).cast<Map<String, dynamic>>();
   List<Map<String, dynamic>> get _visibleCharacters =>
       ((_state['visible_characters'] as List?) ?? const [])
           .cast<Map<String, dynamic>>();
@@ -99,8 +97,10 @@ class _GameScreenState extends State<GameScreen> {
         '/sessions/$_sessionId/actions',
         body: {
           'action_type': actionType,
+          // ignore: use_null_aware_elements
           if (targetCharacterId != null)
             'target_character_id': targetCharacterId,
+          // ignore: use_null_aware_elements
           if (inputText != null) 'input_text': inputText,
           'payload': payload ?? <String, dynamic>{},
         },
