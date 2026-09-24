@@ -10,7 +10,7 @@ class StartSessionRequest(BaseModel):
 
 
 class ActionRequest(BaseModel):
-    action_type: Literal['ask', 'search', 'inspect', 'move']
+    action_type: Literal['ask', 'search', 'inspect', 'move', 'present']
     target_character_id: UUID | None = None
     input_text: str | None = Field(default=None, max_length=1500)
     payload: dict[str, Any] = Field(default_factory=dict)
