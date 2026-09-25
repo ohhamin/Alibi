@@ -155,6 +155,10 @@ class GameService:
                     state['round_submission_done_round'] = 0
                     state['detective_interrogation_done_round'] = 0
                     state['detective_bonus_done_round'] = 0
+                    state['action_flow_version'] = 3
+                    state['action_cycle'] = 1
+                    state['round_actor_actions'] = {}
+                    state['npc_talk_targets'] = {}
 
                     await cur.execute(
                         """
@@ -252,15 +256,29 @@ class GameService:
 
                     await cur.execute(
                         """
-                        select sc.id, sc.display_name, sc.role_label, sc.sort_order
+                        select sc.id, sc.display_name, sc.role_label, sc.sort_order,
+                               sc.is_player_selectable, sc.code
                         from public.story_characters sc
                         where sc.story_version_id = %s
-                          and sc.is_player_selectable = true
                         order by sc.sort_order
                         """,
                         (str(request.story_version_id),),
                     )
-                    ordered = list(await cur.fetchall())
+                    all_actors = list(await cur.fetchall())
+                    player_id = str(request.player_character_id)
+                    player_actor = next(
+                        row for row in all_actors if str(row['id']) == player_id
+                    )
+                    other_suspects = [
+                        row for row in all_actors
+                        if row['is_player_selectable'] and str(row['id']) != player_id
+                    ]
+                    detectives = [
+                        row for row in all_actors
+                        if not row['is_player_selectable']
+                        and (row['role_label'] == '탐정' or row['code'] == 'kang-haejin')
+                    ]
+                    ordered = [player_actor, *other_suspects, *detectives]
                     state['actor_order'] = [str(row['id']) for row in ordered]
                     state['turn_order'] = [
                         {
@@ -305,7 +323,7 @@ class GameService:
                             "모든 용의자는 시작할 때 무작위 증거 3개를 비공개로 소지합니다. "
                             "누군가 확보한 증거는 다른 인물이 다시 찾을 수 없습니다. "
                             "라운드 종료 시 소지 증거가 있다면 반드시 1개를 탐정에게 제출해야 하며, 제출된 증거는 모두에게 공개됩니다. "
-                            "당신 차례에는 주행동 2회를 할 수 있고, 각 주행동 전마다 인접 장소 1칸을 무료로 이동할 수 있습니다."
+                            "한 라운드는 모든 인물이 1행동씩 두 바퀴 순환합니다. 당신도 총 주행동 2회를 하며, 각 행동 전마다 인접 장소 1칸을 무료로 이동할 수 있습니다."
                         ),
                     )
 
@@ -849,7 +867,11 @@ class GameService:
                         and actor_index < len(order)
                         and order[actor_index] == player_id
                     ):
-                        turn_key = f"{session['current_turn']}:{actor_index}"
+                        turn_key = (
+                            f"{session['current_turn']}:"
+                            f"{int(state.get('action_cycle', 1))}:"
+                            f"{actor_index}"
+                        )
                         if state.get('player_turn_key') != turn_key:
                             await cur.execute(
                                 """
@@ -1006,26 +1028,28 @@ class GameService:
                                         )
 
                                     if consumed:
-                                        state['actions_remaining'] = max(
-                                            0, int(state.get('actions_remaining', 2)) - 1
+                                        player_id = str(session['player_character_id'] or '')
+                                        counts = {
+                                            str(key): int(value)
+                                            for key, value in _as_dict(
+                                                state.get('round_actor_actions')
+                                            ).items()
+                                        }
+                                        counts[player_id] = min(
+                                            2, int(counts.get(player_id, 0)) + 1
                                         )
+                                        state['round_actor_actions'] = counts
+                                        state['actions_remaining'] = max(
+                                            0, 2 - counts[player_id]
+                                        )
+                                        state['movement_remaining'] = 0
                                         if not _as_dict(state.get('active_conversation')):
-                                            if int(state.get('actions_remaining', 0)) > 0:
-                                                state['movement_remaining'] = 1
-                                                state['current_actor_id'] = str(
-                                                    session['player_character_id']
-                                                )
-                                                state['current_actor_name'] = await self._player_name(
-                                                    cur, session
-                                                )
-                                            else:
-                                                state['movement_remaining'] = 0
-                                                state['actor_index'] = int(
-                                                    state.get('actor_index', 0)
-                                                ) + 1
-                                                state['current_actor_id'] = None
-                                                state['current_actor_name'] = None
-                                                await self._set_actor_preview(session, state)
+                                            state['actor_index'] = int(
+                                                state.get('actor_index', 0)
+                                            ) + 1
+                                            state['current_actor_id'] = None
+                                            state['current_actor_name'] = None
+                                            await self._set_actor_preview(session, state)
 
                     await cur.execute(
                         """
@@ -1861,11 +1885,6 @@ class GameService:
         source = str(conversation.get('source') or '')
 
         if source == 'player_initiated':
-            if int(state.get('actions_remaining', 0)) > 0:
-                state['movement_remaining'] = 1
-                state['current_actor_id'] = str(session['player_character_id'])
-                state['current_actor_name'] = await self._player_name(cur, session)
-                return
             state['movement_remaining'] = 0
             state['actor_index'] = int(state.get('actor_index', 0)) + 1
             state['current_actor_id'] = None
@@ -1874,20 +1893,7 @@ class GameService:
             return
 
         if source == 'npc_initiated':
-            actor_id = str(conversation.get('actor_id') or '')
-            counts = _as_dict(state.get('npc_action_counts'))
-            completed = int(counts.get(actor_id, 0))
-
-            # Compatibility for a conversation that was started by the older
-            # one-action NPC logic before this version was deployed.
-            if actor_id and completed <= 0:
-                completed = 1
-                counts[actor_id] = completed
-                state['npc_action_counts'] = counts
-                state['npc_action_counts_round'] = int(session['current_turn'])
-
-            if completed >= 2:
-                state['actor_index'] = int(state.get('actor_index', 0)) + 1
+            state['actor_index'] = int(state.get('actor_index', 0)) + 1
             state['current_actor_id'] = None
             state['current_actor_name'] = None
             await self._set_actor_preview(session, state)
@@ -2486,12 +2492,6 @@ class GameService:
                 return
             state['detective_interrogation_done_round'] = current_round
 
-        if int(state.get('detective_bonus_done_round', 0)) != current_round:
-            await self._detective_bonus_action(cur, session, turn, state)
-            state['detective_bonus_done_round'] = current_round
-            if _as_dict(state.get('active_conversation')) or _as_dict(state.get('pending_npc_question')):
-                return
-
         await cur.execute(
             "update public.game_turns set status = 'resolved', closed_at = now() where id = %s",
             (turn['id'],),
@@ -2516,6 +2516,10 @@ class GameService:
         state['pending_evidence_submission'] = None
         state['npc_action_counts'] = {}
         state['npc_action_counts_round'] = next_round
+        state['action_cycle'] = 1
+        state['round_actor_actions'] = {}
+        state['npc_talk_targets'] = {}
+        state['action_flow_version'] = 3
 
         if next_round >= 3:
             await cur.execute(
@@ -2545,7 +2549,7 @@ class GameService:
             'narrator',
             None,
             'narration',
-            f"라운드 {next_round}이 시작되었다. 인물들이 순서대로 행동한다.",
+            f"라운드 {next_round}이 시작되었다. 모든 인물이 1행동씩 두 바퀴 순서대로 행동한다.",
         )
         if next_round == 3:
             await self._insert_message(
@@ -2563,113 +2567,103 @@ class GameService:
         await self._advance_turn_sequence(cur, session, turn, state)
 
     async def _ensure_turn_order(self, cur, session, state) -> None:
-        order = [str(value) for value in _as_list(state.get('actor_order'))]
-        if order:
-            # Older sessions included the detective in the ordinary actor order.
-            # Ordinary rounds belong to the four selectable suspects only; the
-            # detective acts through the dedicated round-end investigation flow.
-            raw_turn_order = [
-                _as_dict(row) for row in _as_list(state.get('turn_order'))
-            ]
-            suspect_turn_order = [
-                row for row in raw_turn_order
-                if str(row.get('role') or '') != '탐정'
-            ]
-            suspect_order = [
-                str(row.get('id') or '') for row in suspect_turn_order
-                if str(row.get('id') or '')
-            ]
-            if suspect_order and suspect_order != order:
-                old_index = int(state.get('actor_index', 0))
-                current_actor_id = str(state.get('current_actor_id') or '')
-                if not current_actor_id and 0 <= old_index < len(order):
-                    current_actor_id = order[old_index]
-                state['actor_order'] = suspect_order
-                state['turn_order'] = suspect_turn_order
-                if current_actor_id in suspect_order:
-                    state['actor_index'] = suspect_order.index(current_actor_id)
-                else:
-                    state['actor_index'] = min(old_index, len(suspect_order))
-                order = suspect_order
-
-            state['actions_per_round'] = 2
-            state.setdefault('active_conversation', None)
-            state.setdefault('pending_evidence_submission', None)
-            state.setdefault('round_submission_done_round', 0)
-            state.setdefault('detective_interrogation_done_round', 0)
-            state.setdefault('movement_remaining', 0)
-            state.setdefault('player_turn_key', None)
-            if int(state.get('npc_action_counts_round', 0)) != int(session['current_turn']):
-                state['npc_action_counts'] = {}
-                state['npc_action_counts_round'] = int(session['current_turn'])
-            else:
-                state.setdefault('npc_action_counts', {})
-
-            if int(state.get('action_rule_version', 0)) < 2:
-                player_id = str(session['player_character_id']) if session['player_character_id'] else ''
-                player_index = next(
-                    (idx for idx, value in enumerate(order) if str(value) == player_id),
-                    -1,
-                )
-                if int(state.get('actor_index', 0)) == player_index:
-                    await cur.execute(
-                        """
-                        select count(*) as cnt
-                        from public.player_actions pa
-                        join public.game_turns gt on gt.id = pa.turn_id
-                        where pa.session_id = %s
-                          and gt.turn_no = %s
-                          and pa.action_type = any(%s)
-                        """,
-                        (
-                            session['id'],
-                            session['current_turn'],
-                            ['act', 'ask', 'search', 'inspect', 'present'],
-                        ),
-                    )
-                    completed = int((await cur.fetchone())['cnt'])
-                    state['actions_remaining'] = max(0, 2 - completed)
-                    state['movement_remaining'] = 1 if state['actions_remaining'] > 0 else 0
-                state['action_rule_version'] = 2
-            return
-        await cur.execute(
-            """
-            select id, display_name, role_label, sort_order
-            from public.story_characters
-            where story_version_id = %s
-              and is_player_selectable = true
-            order by sort_order
-            """,
-            (session['story_version_id'],),
-        )
-        rows = list(await cur.fetchall())
-        state['actor_order'] = [str(row['id']) for row in rows]
-        state['turn_order'] = [
-            {
-                'id': str(row['id']),
-                'name': row['display_name'],
-                'role': row['role_label'],
-                'sort_order': row['sort_order'],
-            }
-            for row in rows
-        ]
-        player_id = str(session['player_character_id']) if session['player_character_id'] else ''
-        state['actor_index'] = next(
-            (idx for idx, value in enumerate(state['actor_order']) if value == player_id),
-            0,
-        )
         state['actions_per_round'] = 2
-        state['actions_remaining'] = 2
-        state['movement_remaining'] = 1
-        state['player_turn_key'] = None
-        state['active_conversation'] = None
-        state['pending_npc_question'] = None
-        state['pending_evidence_submission'] = None
-        state['round_submission_done_round'] = int(state.get('round_submission_done_round', 0))
-        state['detective_interrogation_done_round'] = int(state.get('detective_interrogation_done_round', 0))
-        state['detective_bonus_done_round'] = int(state.get('detective_bonus_done_round', 0))
-        state['npc_action_counts'] = {}
-        state['npc_action_counts_round'] = int(session['current_turn'])
+        state.setdefault('active_conversation', None)
+        state.setdefault('pending_evidence_submission', None)
+        state.setdefault('round_submission_done_round', 0)
+        state.setdefault('detective_interrogation_done_round', 0)
+        state.setdefault('movement_remaining', 0)
+        state.setdefault('player_turn_key', None)
+
+        flow_version = int(state.get('action_flow_version', 0))
+        order = [str(value) for value in _as_list(state.get('actor_order'))]
+        if flow_version < 3 or not order:
+            old_order = list(order)
+            old_index = int(state.get('actor_index', 0))
+            current_actor_id = str(state.get('current_actor_id') or '')
+            if not current_actor_id and 0 <= old_index < len(old_order):
+                current_actor_id = old_order[old_index]
+
+            await cur.execute(
+                """
+                select id, display_name, role_label, sort_order,
+                       is_player_selectable, code
+                from public.story_characters
+                where story_version_id = %s
+                order by sort_order
+                """,
+                (session['story_version_id'],),
+            )
+            rows = list(await cur.fetchall())
+            player_id = str(session['player_character_id'] or '')
+            player_row = next(
+                (row for row in rows if str(row['id']) == player_id),
+                None,
+            )
+            other_suspects = [
+                row for row in rows
+                if row['is_player_selectable'] and str(row['id']) != player_id
+            ]
+            detectives = [
+                row for row in rows
+                if not row['is_player_selectable']
+                and (row['role_label'] == '탐정' or row['code'] == 'kang-haejin')
+            ]
+            ordered = [
+                *([player_row] if player_row is not None else []),
+                *other_suspects,
+                *detectives,
+            ]
+            state['actor_order'] = [str(row['id']) for row in ordered]
+            state['turn_order'] = [
+                {
+                    'id': str(row['id']),
+                    'name': row['display_name'],
+                    'role': row['role_label'],
+                    'sort_order': row['sort_order'],
+                }
+                for row in ordered
+            ]
+            order = [str(row['id']) for row in ordered]
+
+            counts = {
+                str(key): int(value)
+                for key, value in _as_dict(state.get('npc_action_counts')).items()
+                if str(key)
+            }
+            if player_id:
+                await cur.execute(
+                    """
+                    select count(*) as cnt
+                    from public.player_actions pa
+                    join public.game_turns gt on gt.id = pa.turn_id
+                    where pa.session_id = %s
+                      and gt.turn_no = %s
+                      and pa.action_type = any(%s)
+                    """,
+                    (
+                        session['id'],
+                        session['current_turn'],
+                        ['act', 'ask', 'search', 'inspect', 'present', 'skip'],
+                    ),
+                )
+                counts[player_id] = min(2, int((await cur.fetchone())['cnt']))
+
+            state['round_actor_actions'] = counts
+            state['action_cycle'] = 1
+            state['npc_talk_targets'] = {}
+            state['action_flow_version'] = 3
+
+            if current_actor_id in order:
+                state['actor_index'] = order.index(current_actor_id)
+            else:
+                state['actor_index'] = 0
+        else:
+            state.setdefault('round_actor_actions', {})
+            state.setdefault('action_cycle', 1)
+            state.setdefault('npc_talk_targets', {})
+
+        state['action_cycle'] = max(1, min(2, int(state.get('action_cycle', 1))))
 
     async def _advance_turn_sequence(self, cur, session, turn, state) -> None:
         await self._ensure_turn_order(cur, session, state)
@@ -2681,36 +2675,43 @@ class GameService:
             return
 
         order = [str(value) for value in _as_list(state.get('actor_order'))]
+        counts = {
+            str(key): int(value)
+            for key, value in _as_dict(state.get('round_actor_actions')).items()
+        }
+        cycle = max(1, min(2, int(state.get('action_cycle', 1))))
         index = int(state.get('actor_index', 0))
-        if index >= len(order):
+
+        # Skip actors who already completed this cycle. This also self-heals
+        # sessions created by the older "same actor twice in a row" flow.
+        while True:
+            while index < len(order) and int(counts.get(order[index], 0)) >= cycle:
+                index += 1
+
+            if index < len(order):
+                break
+
+            if cycle < 2:
+                cycle += 1
+                index = 0
+                state['action_cycle'] = cycle
+                state['actor_index'] = index
+                continue
+
+            state['action_cycle'] = cycle
+            state['actor_index'] = len(order)
             await self._advance_round(cur, session, turn, state)
             await self._set_actor_preview(session, state)
-
-            # A new round can start with the player as the first actor.
-            # _advance_round resets movement/actions to zero, so initialize the
-            # player's two-action turn here instead of leaving the UI stuck.
             if (
                 not _as_dict(state.get('active_conversation'))
                 and not _as_dict(state.get('pending_npc_question'))
                 and not _as_dict(state.get('pending_evidence_submission'))
             ):
-                next_order = [str(value) for value in _as_list(state.get('actor_order'))]
-                next_index = int(state.get('actor_index', 0))
-                player_id = str(session['player_character_id'] or '')
-                if (
-                    player_id
-                    and next_index < len(next_order)
-                    and next_order[next_index] == player_id
-                ):
-                    turn_key = f"{session['current_turn']}:{next_index}"
-                    if state.get('player_turn_key') != turn_key:
-                        state['player_turn_key'] = turn_key
-                        state['actions_remaining'] = 2
-                        state['movement_remaining'] = 1
-                        state['current_actor_id'] = player_id
-                        state['current_actor_name'] = await self._player_name(cur, session)
+                await self._advance_turn_sequence(cur, session, turn, state)
             return
 
+        state['action_cycle'] = cycle
+        state['actor_index'] = index
         actor_id = order[index]
         turn_info = next(
             (
@@ -2723,39 +2724,33 @@ class GameService:
         state['current_actor_name'] = _as_dict(turn_info).get('name')
 
         if actor_id == str(session['player_character_id']):
-            turn_key = f"{session['current_turn']}:{index}"
+            completed = int(counts.get(actor_id, 0))
+            turn_key = f"{session['current_turn']}:{cycle}:{index}:{completed}"
             if state.get('player_turn_key') != turn_key:
                 state['player_turn_key'] = turn_key
-                state['actions_remaining'] = 2
+                state['actions_remaining'] = max(0, 2 - completed)
                 state['movement_remaining'] = 1
             return
 
-        counts = _as_dict(state.get('npc_action_counts'))
-        if int(state.get('npc_action_counts_round', 0)) != int(session['current_turn']):
-            counts = {}
-            state['npc_action_counts_round'] = int(session['current_turn'])
-        completed = int(counts.get(actor_id, 0))
-        if completed >= 2:
-            state['actor_index'] = index + 1
-            state['actions_remaining'] = 0
-            await self._set_actor_preview(session, state)
-            return
-
         await self._run_single_npc_turn(cur, session, turn, state, actor_id)
-        completed += 1
-        counts[actor_id] = completed
-        state['npc_action_counts'] = counts
-        state['actions_remaining'] = 0
 
-        # An NPC-started conversation pauses that suspect's turn. When it ends,
-        # the same suspect gets the second action if only one has been used.
+        counts = {
+            str(key): int(value)
+            for key, value in _as_dict(state.get('round_actor_actions')).items()
+        }
+        counts[actor_id] = min(2, int(counts.get(actor_id, 0)) + 1)
+        state['round_actor_actions'] = counts
+        state['actions_remaining'] = max(
+            0,
+            2 - int(
+                counts.get(str(session['player_character_id'] or ''), 0)
+            ),
+        )
+
         if _as_dict(state.get('active_conversation')):
             return
 
-        if completed >= 2:
-            state['actor_index'] = index + 1
-        else:
-            state['actor_index'] = index
+        state['actor_index'] = index + 1
         await self._set_actor_preview(session, state)
 
     async def _set_actor_preview(self, session, state) -> None:
@@ -2882,6 +2877,27 @@ class GameService:
             )
         )
 
+        talk_targets = _as_dict(state.get('npc_talk_targets'))
+        actor_talked_to = {
+            str(value)
+            for value in _as_list(talk_targets.get(str(actor['id'])))
+            if str(value)
+        }
+        if (
+            str(choice.get('action_type') or '') == 'talk'
+            and str(choice.get('target_character_id') or '') in actor_talked_to
+        ):
+            choice = {
+                **choice,
+                'action_type': 'investigate',
+                'target_character_id': None,
+                'question': None,
+                'intent': (
+                    '이미 이번 라운드에 같은 상대와 대화했으므로 '
+                    '반복 질문 대신 주변 증거를 확인한다.'
+                ),
+            }
+
         player_location = str(state.get('current_location') or '')
         move_to = str(choice.get('move_to') or '').strip()
         valid_move_codes = {str(row['code']) for row in adjacent_locations}
@@ -2932,6 +2948,16 @@ class GameService:
             valid_targets = {str(row['id']) for row in same_room}
             if target_id in valid_targets:
                 target = next(row for row in same_room if str(row['id']) == target_id)
+                talk_targets = _as_dict(state.get('npc_talk_targets'))
+                actor_targets = [
+                    str(value)
+                    for value in _as_list(talk_targets.get(str(actor['id'])))
+                    if str(value)
+                ]
+                if target_id not in actor_targets:
+                    actor_targets.append(target_id)
+                talk_targets[str(actor['id'])] = actor_targets
+                state['npc_talk_targets'] = talk_targets
                 if target_id == str(session['player_character_id']):
                     question = str(choice.get('question') or '').strip()
                     if not question:
@@ -2945,7 +2971,10 @@ class GameService:
                         cur, session['id'], turn['id'], 'character', actor['id'], 'dialogue', question
                     )
                     state['active_conversation'] = {
-                        'id': f"npc:{session['current_turn']}:{actor['id']}",
+                        'id': (
+                            f"npc:{session['current_turn']}:"
+                            f"{int(state.get('action_cycle', 1))}:{actor['id']}"
+                        ),
                         'source': 'npc_initiated',
                         'actor_id': str(actor['id']),
                         'actor_name': actor['display_name'],
@@ -2957,7 +2986,10 @@ class GameService:
                     await self._record_witnesses(
                         cur, session, turn, current_code,
                         f"{actor['display_name']}: {question}",
-                        source_key=f"npc-question:{session['current_turn']}:{actor['id']}",
+                        source_key=(
+                            f"npc-question:{session['current_turn']}:"
+                            f"{int(state.get('action_cycle', 1))}:{actor['id']}"
+                        ),
                         exclude_ids={str(actor['id'])},
                     )
                     return
@@ -3459,11 +3491,21 @@ class GameService:
         private_result = public_observation
 
         if clue is not None:
+            is_detective = (
+                actor['role_label'] == '탐정'
+                or actor['code'] == 'kang-haejin'
+            )
             await cur.execute(
                 """
                 insert into game_private.session_evidence_holdings
-                  (session_id, clue_code, holder_character_id, acquired_round, acquisition_type, status)
-                values (%s, %s, %s, %s, 'npc_search', 'held')
+                  (session_id, clue_code, holder_character_id, acquired_round,
+                   acquisition_type, status, disclosed_round, disclosed_at)
+                values (
+                  %s, %s, %s, %s,
+                  %s, %s,
+                  case when %s = 'public' then %s else null end,
+                  case when %s = 'public' then now() else null end
+                )
                 on conflict (session_id, clue_code) do nothing
                 returning clue_code
                 """,
@@ -3472,9 +3514,50 @@ class GameService:
                     clue['code'],
                     actor['id'],
                     session['current_turn'],
+                    'detective_search' if is_detective else 'npc_search',
+                    'public' if is_detective else 'held',
+                    'public' if is_detective else 'held',
+                    session['current_turn'],
+                    'public' if is_detective else 'held',
                 ),
             )
             acquired = await cur.fetchone()
+            if acquired and is_detective:
+                fact = f"{clue['player_title']}: {clue['player_text']}"
+                await self._remember(
+                    cur,
+                    session['id'],
+                    actor['id'],
+                    turn['id'],
+                    'clue',
+                    fact,
+                    (
+                        f"detective-turn-clue:{session['current_turn']}:"
+                        f"{int(state.get('action_cycle', 1))}:{clue['code']}"
+                    ),
+                    salience=100,
+                )
+                await self._insert_internal_event(
+                    cur,
+                    session,
+                    'detective_investigate',
+                    actor_character_id=actor['id'],
+                    payload={
+                        'location_code': location_code,
+                        'intent': intent,
+                        'clue_code': clue['code'],
+                    },
+                )
+                await self._publish_evidence(
+                    cur,
+                    session,
+                    turn,
+                    state,
+                    str(clue['code']),
+                    str(actor['id']),
+                    source='detective_search',
+                )
+                return
             if acquired:
                 fact = f"{clue['player_title']}: {clue['player_text']}"
                 private_result = (
@@ -3534,7 +3617,10 @@ class GameService:
             turn,
             location_code,
             public_observation,
-            source_key=f"npc-investigate:{session['current_turn']}:{actor['id']}",
+            source_key=(
+                f"npc-investigate:{session['current_turn']}:"
+                f"{int(state.get('action_cycle', 1))}:{actor['id']}"
+            ),
             exclude_ids={str(actor['id'])},
         )
 
