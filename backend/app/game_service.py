@@ -255,6 +255,7 @@ class GameService:
                         select sc.id, sc.display_name, sc.role_label, sc.sort_order
                         from public.story_characters sc
                         where sc.story_version_id = %s
+                          and sc.is_player_selectable = true
                         order by sc.sort_order
                         """,
                         (str(request.story_version_id),),
@@ -1873,7 +1874,20 @@ class GameService:
             return
 
         if source == 'npc_initiated':
-            state['actor_index'] = int(state.get('actor_index', 0)) + 1
+            actor_id = str(conversation.get('actor_id') or '')
+            counts = _as_dict(state.get('npc_action_counts'))
+            completed = int(counts.get(actor_id, 0))
+
+            # Compatibility for a conversation that was started by the older
+            # one-action NPC logic before this version was deployed.
+            if actor_id and completed <= 0:
+                completed = 1
+                counts[actor_id] = completed
+                state['npc_action_counts'] = counts
+                state['npc_action_counts_round'] = int(session['current_turn'])
+
+            if completed >= 2:
+                state['actor_index'] = int(state.get('actor_index', 0)) + 1
             state['current_actor_id'] = None
             state['current_actor_name'] = None
             await self._set_actor_preview(session, state)
@@ -2500,6 +2514,8 @@ class GameService:
         state['current_actor_name'] = None
         state['pending_npc_question'] = None
         state['pending_evidence_submission'] = None
+        state['npc_action_counts'] = {}
+        state['npc_action_counts_round'] = next_round
 
         if next_round >= 3:
             await cur.execute(
@@ -2547,8 +2563,35 @@ class GameService:
         await self._advance_turn_sequence(cur, session, turn, state)
 
     async def _ensure_turn_order(self, cur, session, state) -> None:
-        order = _as_list(state.get('actor_order'))
+        order = [str(value) for value in _as_list(state.get('actor_order'))]
         if order:
+            # Older sessions included the detective in the ordinary actor order.
+            # Ordinary rounds belong to the four selectable suspects only; the
+            # detective acts through the dedicated round-end investigation flow.
+            raw_turn_order = [
+                _as_dict(row) for row in _as_list(state.get('turn_order'))
+            ]
+            suspect_turn_order = [
+                row for row in raw_turn_order
+                if str(row.get('role') or '') != '탐정'
+            ]
+            suspect_order = [
+                str(row.get('id') or '') for row in suspect_turn_order
+                if str(row.get('id') or '')
+            ]
+            if suspect_order and suspect_order != order:
+                old_index = int(state.get('actor_index', 0))
+                current_actor_id = str(state.get('current_actor_id') or '')
+                if not current_actor_id and 0 <= old_index < len(order):
+                    current_actor_id = order[old_index]
+                state['actor_order'] = suspect_order
+                state['turn_order'] = suspect_turn_order
+                if current_actor_id in suspect_order:
+                    state['actor_index'] = suspect_order.index(current_actor_id)
+                else:
+                    state['actor_index'] = min(old_index, len(suspect_order))
+                order = suspect_order
+
             state['actions_per_round'] = 2
             state.setdefault('active_conversation', None)
             state.setdefault('pending_evidence_submission', None)
@@ -2556,6 +2599,11 @@ class GameService:
             state.setdefault('detective_interrogation_done_round', 0)
             state.setdefault('movement_remaining', 0)
             state.setdefault('player_turn_key', None)
+            if int(state.get('npc_action_counts_round', 0)) != int(session['current_turn']):
+                state['npc_action_counts'] = {}
+                state['npc_action_counts_round'] = int(session['current_turn'])
+            else:
+                state.setdefault('npc_action_counts', {})
 
             if int(state.get('action_rule_version', 0)) < 2:
                 player_id = str(session['player_character_id']) if session['player_character_id'] else ''
@@ -2589,6 +2637,7 @@ class GameService:
             select id, display_name, role_label, sort_order
             from public.story_characters
             where story_version_id = %s
+              and is_player_selectable = true
             order by sort_order
             """,
             (session['story_version_id'],),
@@ -2619,6 +2668,8 @@ class GameService:
         state['round_submission_done_round'] = int(state.get('round_submission_done_round', 0))
         state['detective_interrogation_done_round'] = int(state.get('detective_interrogation_done_round', 0))
         state['detective_bonus_done_round'] = int(state.get('detective_bonus_done_round', 0))
+        state['npc_action_counts'] = {}
+        state['npc_action_counts_round'] = int(session['current_turn'])
 
     async def _advance_turn_sequence(self, cur, session, turn, state) -> None:
         await self._ensure_turn_order(cur, session, state)
@@ -2679,11 +2730,32 @@ class GameService:
                 state['movement_remaining'] = 1
             return
 
+        counts = _as_dict(state.get('npc_action_counts'))
+        if int(state.get('npc_action_counts_round', 0)) != int(session['current_turn']):
+            counts = {}
+            state['npc_action_counts_round'] = int(session['current_turn'])
+        completed = int(counts.get(actor_id, 0))
+        if completed >= 2:
+            state['actor_index'] = index + 1
+            state['actions_remaining'] = 0
+            await self._set_actor_preview(session, state)
+            return
+
         await self._run_single_npc_turn(cur, session, turn, state, actor_id)
+        completed += 1
+        counts[actor_id] = completed
+        state['npc_action_counts'] = counts
+        state['actions_remaining'] = 0
+
+        # An NPC-started conversation pauses that suspect's turn. When it ends,
+        # the same suspect gets the second action if only one has been used.
         if _as_dict(state.get('active_conversation')):
             return
-        state['actor_index'] = index + 1
-        state['actions_remaining'] = 0
+
+        if completed >= 2:
+            state['actor_index'] = index + 1
+        else:
+            state['actor_index'] = index
         await self._set_actor_preview(session, state)
 
     async def _set_actor_preview(self, session, state) -> None:
