@@ -48,10 +48,10 @@ class _GameScreenState extends State<GameScreen> {
       ((_state['character_locations'] as List?) ?? const [])
           .cast<Map<String, dynamic>>();
   List<Map<String, dynamic>> get _inventoryItems {
-    final topLevel = ((_state['inventory_items'] as List?) ?? const [])
+    final persisted = ((_publicState['inventory_items'] as List?) ?? const [])
         .cast<Map<String, dynamic>>();
-    if (topLevel.isNotEmpty) return topLevel;
-    return ((_publicState['inventory_items'] as List?) ?? const [])
+    if (persisted.isNotEmpty) return persisted;
+    return ((_state['inventory_items'] as List?) ?? const [])
         .cast<Map<String, dynamic>>();
   }
   List<Map<String, dynamic>> get _playerActionHistory =>
