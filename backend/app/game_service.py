@@ -2248,18 +2248,47 @@ class GameService:
             if await cur.fetchone():
                 continue
 
-            target_ctx = await self._agent_context_for_character(
-                cur, session, suspect_id, question
-            )
-            target_ctx.player_name = detective['display_name']
-            reply = await self.agent_service.generate_reply(target_ctx)
+            questions = [
+                question,
+                (
+                    "방금 진술한 시간대와 행동을 뒷받침할 근거가 있습니까? "
+                    "지금까지 공개된 증거와 어긋날 수 있는 부분이 있다면 직접 설명해 주세요."
+                ),
+                (
+                    "마지막 질문입니다. 현재 가장 의심하는 사람과 그 이유를 말해 주세요. "
+                    "본인에게 불리해서 말하지 않은 사실이 있다면 지금 설명할 기회입니다."
+                ),
+            ]
+            transcript_lines = [f"{suspect['display_name']} 비공개 취조"]
+            previous_reply = ''
+            for exchange_no, private_question in enumerate(questions, start=1):
+                contextual_question = private_question
+                if previous_reply:
+                    contextual_question = (
+                        f"앞선 답변은 '{previous_reply}'였다. "
+                        f"{private_question}"
+                    )
+                target_ctx = await self._agent_context_for_character(
+                    cur, session, suspect_id, contextual_question
+                )
+                target_ctx.player_name = detective['display_name']
+                reply = await self.agent_service.generate_reply(target_ctx)
+                transcript_lines.append(
+                    f"탐정({exchange_no}/3): {private_question}"
+                )
+                transcript_lines.append(
+                    f"{suspect['display_name']}: {reply}"
+                )
+                previous_reply = reply
+
+            transcript = "\n".join(transcript_lines)
             await self._remember(
                 cur,
                 session['id'],
                 detective['id'],
                 turn['id'],
                 'private_interrogation',
-                f"{suspect['display_name']} 비공개 취조\n탐정: {question}\n{suspect['display_name']}: {reply}",
+                transcript,
                 source_key,
                 salience=100,
             )
@@ -2269,7 +2298,7 @@ class GameService:
                 suspect_id,
                 turn['id'],
                 'private_interrogation',
-                f"탐정의 비공개 취조에서 '{reply}'라고 답했다.",
+                transcript,
                 f"private-interrogation-self:{current_round}:{suspect_id}",
                 salience=80,
             )
