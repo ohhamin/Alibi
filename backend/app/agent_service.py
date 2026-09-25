@@ -206,7 +206,7 @@ class AgentService:
                 model=self.settings.openai_model,
                 instructions=instructions,
                 input=json.dumps(payload, ensure_ascii=False, default=str),
-                max_output_tokens=180,
+                max_output_tokens=self.settings.openai_max_output_tokens,
             )
             raw = (response.output_text or '').strip()
             if raw.startswith('```'):
@@ -426,10 +426,7 @@ JSON 형식:
         )
 
     async def choose_detective_verdict(self, ctx: DetectiveVerdictContext) -> dict[str, Any]:
-        fallback = {
-            'accused_character_id': ctx.candidates[0]['id'] if ctx.candidates else None,
-            'reasoning': '확보한 정보만으로 가장 의심되는 인물을 지목한다.',
-        }
+        fallback = self._fallback_detective_verdict(ctx)
         if self.client is None:
             return fallback
 
@@ -465,7 +462,7 @@ JSON 형식:
                 model=self.settings.openai_model,
                 instructions=instructions,
                 input=input_text,
-                max_output_tokens=min(self.settings.openai_max_output_tokens, 160),
+                max_output_tokens=self.settings.openai_max_output_tokens,
             )
             raw = (response.output_text or '').strip()
             if raw.startswith('```'):
@@ -480,6 +477,49 @@ JSON 형식:
         except (OpenAIError, json.JSONDecodeError, TypeError, ValueError):
             logger.exception('OpenAI structured game response failed; using fallback')
             return fallback
+
+    def _fallback_detective_verdict(
+        self,
+        ctx: DetectiveVerdictContext,
+    ) -> dict[str, Any]:
+        if not ctx.candidates:
+            return {
+                'accused_character_id': None,
+                'reasoning': '확보한 정보만으로는 지목할 후보를 정할 수 없습니다.',
+            }
+
+        evidence = [
+            str(item).strip()
+            for item in [*ctx.known_facts, *ctx.memories]
+            if str(item).strip()
+        ]
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        for index, candidate in enumerate(ctx.candidates):
+            name = str(candidate.get('display_name') or '').strip()
+            score = sum(1 for item in evidence if name and name in item)
+            scored.append((score, -index, candidate))
+        scored.sort(reverse=True, key=lambda item: (item[0], item[1]))
+        accused = scored[0][2]
+        accused_name = str(accused.get('display_name') or '해당 인물')
+
+        direct = [item for item in evidence if accused_name in item]
+        supporting = direct[-3:] if direct else evidence[-3:]
+        if supporting:
+            reasoning = (
+                f"{accused_name}을(를) 지목한 이유는 현재 수사에서 확보한 정황이 "
+                f"이 인물과 가장 많이 연결되기 때문입니다. "
+                + " ".join(supporting)
+            )
+        else:
+            reasoning = (
+                f"{accused_name}을(를) 지목하지만, 직접 연결되는 결정적 증거는 아직 부족합니다. "
+                "현재까지 확보한 정보만으로 내린 잠정적인 결론입니다."
+            )
+
+        return {
+            'accused_character_id': accused.get('id'),
+            'reasoning': reasoning,
+        }
 
     def _fallback_game_action(
         self,
