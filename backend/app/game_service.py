@@ -151,6 +151,9 @@ class GameService:
                     state['inventory_clues'] = []
                     state['world_changes'] = []
                     state['pending_npc_question'] = None
+                    state['pending_evidence_submission'] = None
+                    state['round_submission_done_round'] = 0
+                    state['detective_interrogation_done_round'] = 0
                     state['detective_bonus_done_round'] = 0
 
                     await cur.execute(
@@ -234,6 +237,53 @@ class GameService:
 
                     await cur.execute(
                         """
+                        with suspects as (
+                          select sc.id, row_number() over (order by sc.sort_order) as suspect_no
+                          from public.story_characters sc
+                          where sc.story_version_id = %s
+                            and sc.is_player_selectable = true
+                        ),
+                        random_clues as (
+                          select q.code, row_number() over () as clue_no
+                          from (
+                            select c.code
+                            from game_private.story_clues c
+                            where c.story_version_id = %s
+                            order by random()
+                            limit (select count(*) * 3 from suspects)
+                          ) q
+                        )
+                        insert into game_private.session_evidence_holdings
+                          (session_id, clue_code, holder_character_id, acquired_round, acquisition_type, status)
+                        select
+                          %s,
+                          rc.code,
+                          s.id,
+                          1,
+                          'initial',
+                          'held'
+                        from suspects s
+                        join random_clues rc
+                          on rc.clue_no between ((s.suspect_no - 1) * 3 + 1) and (s.suspect_no * 3)
+                        on conflict (session_id, clue_code) do nothing
+                        """,
+                        (
+                            str(request.story_version_id),
+                            str(request.story_version_id),
+                            session_id,
+                        ),
+                    )
+                    await self._sync_player_inventory_state(
+                        cur,
+                        {
+                            'id': session_id,
+                            'player_character_id': str(request.player_character_id),
+                        },
+                        state,
+                    )
+
+                    await cur.execute(
+                        """
                         select sc.id, sc.display_name, sc.role_label, sc.sort_order
                         from public.story_characters sc
                         where sc.story_version_id = %s
@@ -283,7 +333,10 @@ class GameService:
                         'system',
                         (
                             f"당신은 {player['display_name']}({player['role_label']})입니다. "
-                            "모든 인물은 위에서부터 한 번씩 행동합니다. 당신 차례에는 주행동 2회를 할 수 있고, 각 주행동 전마다 인접 장소 1칸을 무료로 이동할 수 있습니다."
+                            "모든 용의자는 시작할 때 무작위 증거 3개를 비공개로 소지합니다. "
+                            "누군가 확보한 증거는 다른 인물이 다시 찾을 수 없습니다. "
+                            "라운드 종료 시 소지 증거가 있다면 반드시 1개를 탐정에게 제출해야 하며, 제출된 증거는 모두에게 공개됩니다. "
+                            "당신 차례에는 주행동 2회를 할 수 있고, 각 주행동 전마다 인접 장소 1칸을 무료로 이동할 수 있습니다."
                         ),
                     )
 
@@ -476,19 +529,34 @@ class GameService:
                 )
                 player_action_history = list(await cur.fetchall())
 
-                # Every discovered clue can be presented during a conversation.
-                # Physical "taken" items may still be tracked separately in
-                # public_state.inventory_clues for scene mutation, but the
-                # presentation UI should reflect the player's known evidence.
-                inventory_items: list[dict[str, Any]] = [
-                    {
-                        'clue_code': clue.get('clue_code'),
-                        'title': clue.get('title'),
-                        'content': clue.get('content'),
-                        'category': clue.get('category'),
-                    }
-                    for clue in clues
-                ]
+                # Public clues live in public.session_clues. Evidence that the
+                # player is still hiding is kept separately as a private holding.
+                inventory_items: list[dict[str, Any]] = []
+                if session['player_character_id']:
+                    await cur.execute(
+                        """
+                        select h.clue_code,
+                               c.player_title as title,
+                               c.player_text as content,
+                               c.category,
+                               h.acquired_round,
+                               h.acquisition_type,
+                               'private'::text as visibility
+                        from game_private.session_evidence_holdings h
+                        join game_private.story_clues c
+                          on c.story_version_id = %s and c.code = h.clue_code
+                        where h.session_id = %s
+                          and h.holder_character_id = %s
+                          and h.status = 'held'
+                        order by h.acquired_at, h.clue_code
+                        """,
+                        (
+                            session['story_version_id'],
+                            session_id,
+                            session['player_character_id'],
+                        ),
+                    )
+                    inventory_items = list(await cur.fetchall())
 
                 known_locations = _as_dict(state.get('known_character_locations'))
                 character_dossiers: list[dict[str, Any]] = []
@@ -563,6 +631,7 @@ class GameService:
                     'character_dossiers': character_dossiers,
                     'known_character_locations': _as_dict(state.get('known_character_locations')),
                     'pending_npc_question': state.get('pending_npc_question'),
+                    'pending_evidence_submission': state.get('pending_evidence_submission'),
                     'active_conversation': state.get('active_conversation'),
                     'inventory_items': inventory_items,
                     'player_action_history': player_action_history,
@@ -601,7 +670,11 @@ class GameService:
 
                     state = deepcopy(_as_dict(session['public_state']))
                     await self._ensure_turn_order(cur, session, state)
-                    if _as_dict(state.get('active_conversation')) or _as_dict(state.get('pending_npc_question')):
+                    if (
+                        _as_dict(state.get('active_conversation'))
+                        or _as_dict(state.get('pending_npc_question'))
+                        or _as_dict(state.get('pending_evidence_submission'))
+                    ):
                         return await self.get_session_state(user_id, session_id)
                     if str(state.get('current_actor_id') or '') == str(session['player_character_id']):
                         return await self.get_session_state(user_id, session_id)
@@ -700,105 +773,119 @@ class GameService:
                             state['current_actor_id'] = player_id
                             state['current_actor_name'] = await self._player_name(cur, session)
 
-                    conversation = _as_dict(state.get('active_conversation'))
-                    if conversation:
-                        if request.action_type == 'reply':
-                            ended = await self._continue_conversation(
-                                cur, session, turn, state, request, client_action_id, conversation
-                            )
-                        elif request.action_type == 'conversation_present':
-                            ended = await self._present_in_conversation(
-                                cur, session, turn, state, request, client_action_id, conversation
-                            )
-                        elif request.action_type == 'end_conversation':
-                            await self._end_conversation(
-                                cur, session, turn, state, request, client_action_id, conversation
-                            )
-                            ended = True
-                        else:
+                    pending_submission = _as_dict(state.get('pending_evidence_submission'))
+                    if pending_submission:
+                        if request.action_type != 'submit_evidence':
                             raise HTTPException(
                                 status_code=409,
-                                detail='진행 중인 대화를 먼저 이어가거나 종료해 주세요.',
+                                detail='라운드 종료 전에 소지 증거 1개를 탐정에게 제출해야 합니다.',
                             )
-                        if ended:
-                            await self._finish_conversation_turn(cur, session, turn, state, conversation)
+                        await self._handle_evidence_submission(
+                            cur, session, turn, state, request, client_action_id
+                        )
+                        state['pending_evidence_submission'] = None
+                        state['round_submission_done_round'] = int(session['current_turn'])
+                        await self._advance_round(cur, session, turn, state)
                     else:
-                        pending = _as_dict(state.get('pending_npc_question'))
-                        if pending:
-                            if request.action_type != 'reply':
+                        conversation = _as_dict(state.get('active_conversation'))
+                            if conversation:
+                            if request.action_type == 'reply':
+                                ended = await self._continue_conversation(
+                                    cur, session, turn, state, request, client_action_id, conversation
+                                )
+                            elif request.action_type == 'conversation_present':
+                                ended = await self._present_in_conversation(
+                                    cur, session, turn, state, request, client_action_id, conversation
+                                )
+                            elif request.action_type == 'end_conversation':
+                                await self._end_conversation(
+                                    cur, session, turn, state, request, client_action_id, conversation
+                                )
+                                ended = True
+                            else:
                                 raise HTTPException(
                                     status_code=409,
-                                    detail=f"{pending.get('actor_name', '인물')}의 질문에 먼저 답해야 합니다.",
+                                    detail='진행 중인 대화를 먼저 이어가거나 종료해 주세요.',
                                 )
-                            await self._handle_reply(
-                                cur, session, turn, state, request, client_action_id, pending
-                            )
-                            await self._advance_turn_sequence(cur, session, turn, state)
+                            if ended:
+                                await self._finish_conversation_turn(cur, session, turn, state, conversation)
                         else:
-                            if str(state.get('current_actor_id') or '') != str(session['player_character_id']):
-                                await self._advance_turn_sequence(cur, session, turn, state)
-                            if _as_dict(state.get('active_conversation')):
-                                pass
-                            elif str(state.get('current_actor_id') or '') != str(session['player_character_id']):
-                                raise HTTPException(status_code=409, detail='아직 당신의 차례가 아닙니다.')
-                            else:
-                                if (
-                                    request.action_type != 'move'
-                                    and int(state.get('actions_remaining', 0)) <= 0
-                                ):
+                            pending = _as_dict(state.get('pending_npc_question'))
+                            if pending:
+                                if request.action_type != 'reply':
                                     raise HTTPException(
                                         status_code=409,
-                                        detail='이번 차례의 주행동 2회를 모두 사용했습니다.',
+                                        detail=f"{pending.get('actor_name', '인물')}의 질문에 먼저 답해야 합니다.",
                                     )
-
-                                consumed = False
-                                if request.action_type == 'move':
-                                    consumed = await self._handle_move(
-                                        cur, session, turn, state, request, client_action_id
-                                    )
-                                elif request.action_type == 'act':
-                                    consumed = await self._handle_free_action(
-                                        cur, session, turn, state, request, client_action_id,
-                                        action_text=(request.input_text or '').strip(),
-                                    )
-                                elif request.action_type in {'search', 'inspect'}:
-                                    legacy_text = (
-                                        (request.input_text or '').strip()
-                                        or ('주변을 꼼꼼히 살펴본다.' if request.action_type == 'search'
-                                            else '눈에 보이는 것을 자세히 조사한다.')
-                                    )
-                                    consumed = await self._handle_free_action(
-                                        cur, session, turn, state, request, client_action_id,
-                                        action_text=legacy_text,
-                                    )
-                                elif request.action_type == 'ask':
-                                    consumed = await self._handle_ask(
-                                        cur, session, turn, state, request, client_action_id
-                                    )
-                                elif request.action_type == 'present':
-                                    consumed = await self._handle_present(
-                                        cur, session, turn, state, request, client_action_id
-                                    )
-                                elif request.action_type in {'reply', 'conversation_present', 'end_conversation'}:
-                                    raise HTTPException(status_code=409, detail='현재 진행 중인 대화가 없습니다.')
+                                await self._handle_reply(
+                                    cur, session, turn, state, request, client_action_id, pending
+                                )
+                                await self._advance_turn_sequence(cur, session, turn, state)
+                            else:
+                                if str(state.get('current_actor_id') or '') != str(session['player_character_id']):
+                                    await self._advance_turn_sequence(cur, session, turn, state)
+                                if _as_dict(state.get('active_conversation')):
+                                    pass
+                                elif str(state.get('current_actor_id') or '') != str(session['player_character_id']):
+                                    raise HTTPException(status_code=409, detail='아직 당신의 차례가 아닙니다.')
                                 else:
-                                    raise HTTPException(status_code=400, detail='지원하지 않는 행동입니다.')
+                                    if (
+                                        request.action_type != 'move'
+                                        and int(state.get('actions_remaining', 0)) <= 0
+                                    ):
+                                        raise HTTPException(
+                                            status_code=409,
+                                            detail='이번 차례의 주행동 2회를 모두 사용했습니다.',
+                                        )
 
-                                if consumed:
-                                    state['actions_remaining'] = max(
-                                        0, int(state.get('actions_remaining', 2)) - 1
-                                    )
-                                    if not _as_dict(state.get('active_conversation')):
-                                        if int(state.get('actions_remaining', 0)) > 0:
-                                            state['movement_remaining'] = 1
-                                            state['current_actor_id'] = str(session['player_character_id'])
-                                            state['current_actor_name'] = await self._player_name(cur, session)
-                                        else:
-                                            state['movement_remaining'] = 0
-                                            state['actor_index'] = int(state.get('actor_index', 0)) + 1
-                                            state['current_actor_id'] = None
-                                            state['current_actor_name'] = None
-                                            await self._set_actor_preview(session, state)
+                                    consumed = False
+                                    if request.action_type == 'move':
+                                        consumed = await self._handle_move(
+                                            cur, session, turn, state, request, client_action_id
+                                        )
+                                    elif request.action_type == 'act':
+                                        consumed = await self._handle_free_action(
+                                            cur, session, turn, state, request, client_action_id,
+                                            action_text=(request.input_text or '').strip(),
+                                        )
+                                    elif request.action_type in {'search', 'inspect'}:
+                                        legacy_text = (
+                                            (request.input_text or '').strip()
+                                            or ('주변을 꼼꼼히 살펴본다.' if request.action_type == 'search'
+                                                else '눈에 보이는 것을 자세히 조사한다.')
+                                        )
+                                        consumed = await self._handle_free_action(
+                                            cur, session, turn, state, request, client_action_id,
+                                            action_text=legacy_text,
+                                        )
+                                    elif request.action_type == 'ask':
+                                        consumed = await self._handle_ask(
+                                            cur, session, turn, state, request, client_action_id
+                                        )
+                                    elif request.action_type == 'present':
+                                        consumed = await self._handle_present(
+                                            cur, session, turn, state, request, client_action_id
+                                        )
+                                    elif request.action_type in {'reply', 'conversation_present', 'end_conversation'}:
+                                        raise HTTPException(status_code=409, detail='현재 진행 중인 대화가 없습니다.')
+                                    else:
+                                        raise HTTPException(status_code=400, detail='지원하지 않는 행동입니다.')
+
+                                    if consumed:
+                                        state['actions_remaining'] = max(
+                                            0, int(state.get('actions_remaining', 2)) - 1
+                                        )
+                                        if not _as_dict(state.get('active_conversation')):
+                                            if int(state.get('actions_remaining', 0)) > 0:
+                                                state['movement_remaining'] = 1
+                                                state['current_actor_id'] = str(session['player_character_id'])
+                                                state['current_actor_name'] = await self._player_name(cur, session)
+                                            else:
+                                                state['movement_remaining'] = 0
+                                                state['actor_index'] = int(state.get('actor_index', 0)) + 1
+                                                state['current_actor_id'] = None
+                                                state['current_actor_name'] = None
+                                                await self._set_actor_preview(session, state)
 
                     await cur.execute(
                         """
@@ -1507,6 +1594,12 @@ class GameService:
             await self._set_actor_preview(session, state)
             return
 
+        if source == 'detective_interrogation':
+            state['detective_interrogation_done_round'] = int(session['current_turn'])
+            await self._advance_round(cur, session, turn, state)
+            await self._set_actor_preview(session, state)
+            return
+
         await self._set_actor_preview(session, state)
     async def _handle_present(self, cur, session, turn, state, request, client_action_id: str) -> bool:
         if request.target_character_id is None:
@@ -1643,8 +1736,413 @@ class GameService:
         )
         return True
 
+    async def _sync_player_inventory_state(self, cur, session, state) -> None:
+        player_id = str(session.get('player_character_id') or '')
+        if not player_id:
+            state['inventory_clues'] = []
+            return
+        await cur.execute(
+            """
+            select clue_code
+            from game_private.session_evidence_holdings
+            where session_id = %s
+              and holder_character_id = %s
+              and status = 'held'
+            order by acquired_at, clue_code
+            """,
+            (session['id'], player_id),
+        )
+        state['inventory_clues'] = [row['clue_code'] for row in await cur.fetchall()]
+
+    async def _publish_evidence(
+        self,
+        cur,
+        session,
+        turn,
+        state,
+        clue_code: str,
+        holder_character_id: str,
+        *,
+        opinion: str = '',
+        source: str = 'round_submission',
+    ) -> dict[str, Any] | None:
+        await cur.execute(
+            """
+            select c.code, c.player_title, c.player_text, c.category
+            from game_private.story_clues c
+            where c.story_version_id = %s and c.code = %s
+            """,
+            (session['story_version_id'], clue_code),
+        )
+        clue = await cur.fetchone()
+        if clue is None:
+            return None
+
+        await cur.execute(
+            """
+            update game_private.session_evidence_holdings
+            set status = 'public',
+                disclosed_round = %s,
+                disclosed_at = now(),
+                disclosed_opinion = nullif(%s, '')
+            where session_id = %s
+              and clue_code = %s
+              and holder_character_id = %s
+            """,
+            (
+                session['current_turn'],
+                opinion,
+                session['id'],
+                clue_code,
+                holder_character_id,
+            ),
+        )
+        await cur.execute(
+            """
+            insert into public.session_clues
+              (session_id, clue_code, title, content, category, discovered_turn)
+            values (%s, %s, %s, %s, %s, %s)
+            on conflict (session_id, clue_code) do nothing
+            """,
+            (
+                session['id'],
+                clue['code'],
+                clue['player_title'],
+                clue['player_text'],
+                clue['category'],
+                session['current_turn'],
+            ),
+        )
+        await cur.execute(
+            """
+            select display_name
+            from public.story_characters
+            where id = %s
+            """,
+            (holder_character_id,),
+        )
+        holder = await cur.fetchone()
+        holder_name = holder['display_name'] if holder else '누군가'
+
+        if source == 'detective_search':
+            public_text = (
+                f"[공개 증거] 탐정이 '{clue['player_title']}'을(를) 발견해 모두에게 공개했다. "
+                f"{clue['player_text']}"
+            )
+        elif source == 'detective_present':
+            public_text = (
+                f"[공개 증거] {holder_name}이(가) 탐정에게 '{clue['player_title']}'을(를) 제시했다. "
+                f"{clue['player_text']}"
+            )
+        else:
+            public_text = (
+                f"[라운드 증거 제출] {holder_name}이(가) 탐정에게 "
+                f"'{clue['player_title']}'을(를) 제출했다. {clue['player_text']}"
+            )
+            if opinion.strip():
+                public_text += f" 제출 의견: {opinion.strip()}"
+
+        await self._broadcast_memory(
+            cur,
+            session,
+            turn,
+            public_text,
+            source_key=f"public-evidence:{session['current_turn']}:{clue_code}",
+        )
+        await self._insert_message(
+            cur,
+            session['id'],
+            turn['id'],
+            'narrator',
+            None,
+            'narration',
+            public_text,
+        )
+        await self._insert_internal_event(
+            cur,
+            session,
+            'evidence_published',
+            actor_character_id=holder_character_id,
+            payload={
+                'clue_code': clue_code,
+                'source': source,
+                'opinion': opinion.strip() or None,
+            },
+        )
+        await self._sync_player_inventory_state(cur, session, state)
+        return clue
+
+    async def _auto_submit_npc_evidence(self, cur, session, turn, state) -> None:
+        await cur.execute(
+            """
+            select sc.id, sc.code, sc.display_name
+            from public.story_characters sc
+            where sc.story_version_id = %s
+              and sc.is_player_selectable = true
+              and (%s is null or sc.id <> %s)
+            order by sc.sort_order
+            """,
+            (
+                session['story_version_id'],
+                session['player_character_id'],
+                session['player_character_id'],
+            ),
+        )
+        suspects = list(await cur.fetchall())
+        for suspect in suspects:
+            await cur.execute(
+                """
+                select h.clue_code, c.player_title, c.metadata
+                from game_private.session_evidence_holdings h
+                join game_private.story_clues c
+                  on c.story_version_id = %s and c.code = h.clue_code
+                where h.session_id = %s
+                  and h.holder_character_id = %s
+                  and h.status = 'held'
+                order by
+                  case when c.metadata->>'supports_alibi_for' = %s then 0 else 1 end,
+                  case when c.metadata->>'suspect_code' = %s then 1 else 0 end,
+                  random()
+                limit 1
+                """,
+                (
+                    session['story_version_id'],
+                    session['id'],
+                    suspect['id'],
+                    suspect['code'],
+                    suspect['code'],
+                ),
+            )
+            clue = await cur.fetchone()
+            if clue is None:
+                continue
+            metadata = _as_dict(clue['metadata'])
+            if str(metadata.get('supports_alibi_for') or '') == str(suspect['code']):
+                opinion = '제 동선을 확인하는 데 도움이 될 수 있는 자료라서 제출합니다.'
+            elif str(metadata.get('suspect_code') or '') == str(suspect['code']):
+                opinion = '제가 갖고 있던 자료입니다. 오해가 생기기 전에 그대로 제출하겠습니다.'
+            else:
+                opinion = '수사에 도움이 될 수 있어 제가 가진 자료를 제출합니다.'
+            await self._publish_evidence(
+                cur,
+                session,
+                turn,
+                state,
+                str(clue['clue_code']),
+                str(suspect['id']),
+                opinion=opinion,
+                source='round_submission',
+            )
+
+    async def _prepare_round_end_submissions(self, cur, session, turn, state) -> bool:
+        current_round = int(session['current_turn'])
+        if int(state.get('round_submission_done_round', 0)) == current_round:
+            return True
+
+        await self._auto_submit_npc_evidence(cur, session, turn, state)
+
+        player_id = str(session.get('player_character_id') or '')
+        if player_id:
+            await cur.execute(
+                """
+                select count(*) as cnt
+                from game_private.session_evidence_holdings
+                where session_id = %s
+                  and holder_character_id = %s
+                  and status = 'held'
+                """,
+                (session['id'], player_id),
+            )
+            held_count = int((await cur.fetchone())['cnt'])
+            if held_count > 0:
+                if not _as_dict(state.get('pending_evidence_submission')):
+                    state['pending_evidence_submission'] = {
+                        'round': current_round,
+                        'required': True,
+                        'message': '라운드가 끝났습니다. 소지한 증거 중 1개를 탐정에게 제출해야 합니다.',
+                    }
+                    await self._insert_message(
+                        cur,
+                        session['id'],
+                        turn['id'],
+                        'system',
+                        None,
+                        'system',
+                        '라운드 종료: 소지한 증거 중 1개를 탐정에게 제출하세요. 제출한 증거와 의견은 모두에게 공개됩니다.',
+                    )
+                return False
+
+        state['round_submission_done_round'] = current_round
+        state['pending_evidence_submission'] = None
+        return True
+
+    async def _handle_evidence_submission(
+        self, cur, session, turn, state, request, client_action_id: str
+    ) -> None:
+        clue_code = str(request.payload.get('clue_code') or '').strip()
+        if not clue_code:
+            raise HTTPException(status_code=400, detail='제출할 증거를 선택해 주세요.')
+        player_id = str(session.get('player_character_id') or '')
+        await cur.execute(
+            """
+            select 1
+            from game_private.session_evidence_holdings
+            where session_id = %s
+              and clue_code = %s
+              and holder_character_id = %s
+              and status = 'held'
+            """,
+            (session['id'], clue_code, player_id),
+        )
+        if await cur.fetchone() is None:
+            raise HTTPException(status_code=400, detail='현재 소지하고 있는 증거만 제출할 수 있습니다.')
+
+        opinion = (request.input_text or '').strip()
+        await self._insert_action(
+            cur,
+            client_action_id,
+            session['id'],
+            turn['id'],
+            request,
+            payload={'clue_code': clue_code, 'round_end_submission': True},
+        )
+        await self._publish_evidence(
+            cur,
+            session,
+            turn,
+            state,
+            clue_code,
+            player_id,
+            opinion=opinion,
+            source='round_submission',
+        )
+
+    async def _run_private_detective_interrogations(self, cur, session, turn, state) -> bool:
+        current_round = int(session['current_turn'])
+        if current_round not in {2, 5}:
+            return False
+        if int(state.get('detective_interrogation_done_round', 0)) == current_round:
+            return False
+
+        await cur.execute(
+            """
+            select sc.id, sc.display_name
+            from public.story_characters sc
+            where sc.story_version_id = %s
+              and (sc.role_label = '탐정' or sc.code = 'kang-haejin')
+            order by sc.sort_order
+            limit 1
+            """,
+            (session['story_version_id'],),
+        )
+        detective = await cur.fetchone()
+        if detective is None:
+            state['detective_interrogation_done_round'] = current_round
+            return False
+
+        await cur.execute(
+            """
+            select sc.id, sc.display_name
+            from public.story_characters sc
+            where sc.story_version_id = %s
+              and sc.is_player_selectable = true
+            order by sc.sort_order
+            """,
+            (session['story_version_id'],),
+        )
+        suspects = list(await cur.fetchall())
+        player_id = str(session.get('player_character_id') or '')
+        question = (
+            f"라운드 {current_round} 비공개 취조입니다. "
+            "사건 시각의 동선, 지금까지 알게 된 증거, 다른 사람의 수상한 행동을 "
+            "가능하면 구체적인 시간과 함께 설명해 주세요."
+        )
+
+        for suspect in suspects:
+            suspect_id = str(suspect['id'])
+            if suspect_id == player_id:
+                continue
+            source_key = f"private-interrogation:{current_round}:{suspect_id}"
+            await cur.execute(
+                """
+                select 1
+                from game_private.agent_memories
+                where session_id = %s
+                  and character_id = %s
+                  and source_key = %s
+                """,
+                (session['id'], detective['id'], source_key),
+            )
+            if await cur.fetchone():
+                continue
+
+            target_ctx = await self._agent_context_for_character(
+                cur, session, suspect_id, question
+            )
+            reply = await self.agent_service.generate_reply(target_ctx)
+            await self._remember(
+                cur,
+                session['id'],
+                detective['id'],
+                turn['id'],
+                'private_interrogation',
+                f"{suspect['display_name']} 비공개 취조\n탐정: {question}\n{suspect['display_name']}: {reply}",
+                source_key,
+                salience=100,
+            )
+            await self._remember(
+                cur,
+                session['id'],
+                suspect_id,
+                turn['id'],
+                'private_interrogation',
+                f"탐정의 비공개 취조에서 '{reply}'라고 답했다.",
+                f"private-interrogation-self:{current_round}:{suspect_id}",
+                salience=80,
+            )
+
+        if player_id:
+            await self._insert_message(
+                cur,
+                session['id'],
+                turn['id'],
+                'character',
+                detective['id'],
+                'dialogue',
+                f"[비공개 취조] {question}",
+            )
+            state['active_conversation'] = {
+                'id': f"detective-interrogation:{current_round}",
+                'source': 'detective_interrogation',
+                'private': True,
+                'actor_id': str(detective['id']),
+                'actor_name': detective['display_name'],
+                'location_code': None,
+                'exchange_count': 0,
+                'max_exchanges': 3,
+                'history': [{'speaker': detective['display_name'], 'text': question}],
+            }
+            return True
+
+        state['detective_interrogation_done_round'] = current_round
+        return False
+
     async def _advance_round(self, cur, session, turn, state) -> None:
         current_round = int(session['current_turn'])
+
+        if not await self._prepare_round_end_submissions(cur, session, turn, state):
+            return
+
+        if (
+            current_round in {2, 5}
+            and int(state.get('detective_interrogation_done_round', 0)) != current_round
+        ):
+            started = await self._run_private_detective_interrogations(
+                cur, session, turn, state
+            )
+            if started:
+                return
+            state['detective_interrogation_done_round'] = current_round
 
         if int(state.get('detective_bonus_done_round', 0)) != current_round:
             await self._detective_bonus_action(cur, session, turn, state)
@@ -1673,6 +2171,7 @@ class GameService:
         state['current_actor_id'] = None
         state['current_actor_name'] = None
         state['pending_npc_question'] = None
+        state['pending_evidence_submission'] = None
 
         if next_round >= 3:
             await cur.execute(
@@ -1724,6 +2223,9 @@ class GameService:
         if order:
             state['actions_per_round'] = 2
             state.setdefault('active_conversation', None)
+            state.setdefault('pending_evidence_submission', None)
+            state.setdefault('round_submission_done_round', 0)
+            state.setdefault('detective_interrogation_done_round', 0)
             state.setdefault('movement_remaining', 0)
             state.setdefault('player_turn_key', None)
 
@@ -1785,11 +2287,18 @@ class GameService:
         state['player_turn_key'] = None
         state['active_conversation'] = None
         state['pending_npc_question'] = None
+        state['pending_evidence_submission'] = None
+        state['round_submission_done_round'] = int(state.get('round_submission_done_round', 0))
+        state['detective_interrogation_done_round'] = int(state.get('detective_interrogation_done_round', 0))
         state['detective_bonus_done_round'] = int(state.get('detective_bonus_done_round', 0))
 
     async def _advance_turn_sequence(self, cur, session, turn, state) -> None:
         await self._ensure_turn_order(cur, session, state)
-        if _as_dict(state.get('active_conversation')) or _as_dict(state.get('pending_npc_question')):
+        if (
+            _as_dict(state.get('active_conversation'))
+            or _as_dict(state.get('pending_npc_question'))
+            or _as_dict(state.get('pending_evidence_submission'))
+        ):
             return
 
         order = [str(value) for value in _as_list(state.get('actor_order'))]
@@ -1804,6 +2313,7 @@ class GameService:
             if (
                 not _as_dict(state.get('active_conversation'))
                 and not _as_dict(state.get('pending_npc_question'))
+                and not _as_dict(state.get('pending_evidence_submission'))
             ):
                 next_order = [str(value) for value in _as_list(state.get('actor_order'))]
                 next_index = int(state.get('actor_index', 0))
