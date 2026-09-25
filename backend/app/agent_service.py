@@ -136,6 +136,8 @@ class AgentService:
 - 존재하지 않는 사람, 장소, 물건, CCTV, 증거를 거짓말로 새로 만들어내면 안 된다.
 - 플레이어에게 직접 제시받지 않은 물리 증거를 먼저 아는 척하지 않는다.
 - personality의 tone/traits가 어휘, 문장 길이, 감정 표현, 회피 방식에 실제로 드러나야 한다.
+- 당신은 사건을 해결하는 탐정이 아니라 사건의 이해관계자이자 용의자다. 질문을 받으면 자신의 입장과 알리바이를 지키려는 태도가 자연스럽게 드러나야 한다.
+- 다른 사람을 취조하듯 사건 전체를 정리하려 하지 말고, 본인이 왜 의심받으면 안 되는지 설명하거나 본인에게 불리한 정황을 해명하는 데 집중한다.
 - 답변은 한국어로 1~4문장, 캐릭터 말투로 자연스럽게 한다.
 - 괄호 안 독백이나 메타 설명을 출력하지 않는다.
 """.strip()
@@ -185,6 +187,8 @@ class AgentService:
 - 거짓말 여부를 메타적으로 설명하지 않는다.
 - 존재하지 않는 인물/장소/물건/증거를 만들어내지 않는다.
 - 제시된 물건이 있으면 실제로 눈앞에서 본 것으로 취급하고 반응한다.
+- 당신은 탐정처럼 사건 전체를 해결하려 들지 않는다. 자신의 알리바이, 자신에게 유리하거나 불리한 증거, 자신을 본 사람과의 관계를 중심으로 반응한다.
+- 본인에게 불리한 증거가 나오면 성격과 거짓말 정책에 따라 해명, 축소, 반박, 회피하려는 태도가 자연스럽게 드러날 수 있다.
 - 답변은 한국어 1~3문장으로 짧게 한다.
 - 더 말할 이유가 없거나 불쾌/경계/목표상 대화를 끊는 것이 자연스러우면 end_conversation=true로 한다.
 - 현재 {ctx.exchange_no}/{ctx.max_exchanges}번째 왕복이다. 최대치를 넘길 수 없다.
@@ -315,16 +319,55 @@ JSON 형식:
             return result_text
 
     async def choose_npc_action(self, ctx: NpcActionContext) -> dict[str, Any]:
-        fallback = {
-            'move_to': (
-                ctx.adjacent_locations[0].get('code')
-                if ctx.adjacent_locations else None
-            ),
-            'action_type': 'investigate',
-            'target_character_id': None,
-            'question': None,
-            'intent': '자신의 목표에 따라 적극적으로 다음 단서를 찾는다.',
-        }
+        if ctx.is_detective:
+            fallback = {
+                'move_to': (
+                    ctx.adjacent_locations[0].get('code')
+                    if ctx.adjacent_locations else None
+                ),
+                'action_type': 'investigate',
+                'target_character_id': None,
+                'question': None,
+                'intent': '수사 공백을 줄이기 위해 현장을 확인한다.',
+            }
+            role_guidance = """
+당신은 탐정이다.
+- 여러 인물의 진술과 증거를 비교하고 사건의 진실을 밝히는 것이 목적이다.
+- investigate와 talk를 사용해 정보 공백을 줄이고 모순을 확인한다.
+""".strip()
+        else:
+            first_target = (
+                str(ctx.same_room_characters[0].get('id'))
+                if ctx.same_room_characters else None
+            )
+            fallback = {
+                'move_to': None,
+                'action_type': 'talk' if first_target else 'investigate',
+                'target_character_id': first_target,
+                'question': (
+                    '사건 시각에 제가 어디 있었는지 기억나는 게 있나요?'
+                    if first_target else None
+                ),
+                'intent': (
+                    '내 알리바이를 확인해 줄 사람의 기억을 확인한다.'
+                    if first_target
+                    else '내게 유리하거나 불리할 수 있는 증거를 먼저 확인한다.'
+                ),
+            }
+            role_guidance = """
+당신은 탐정이 아니라 살인 사건의 용의자다. 가장 중요한 목표는 '범인을 밝혀내는 것'보다 현재 상황에서 자신이 범인으로 몰리지 않도록 자신의 입장을 지키는 것이다.
+
+용의자 행동 원칙:
+- 자신의 알리바이를 강화할 수 있는 사람, 시간대, 증거를 우선 신경 쓴다.
+- 다른 사람에게 말을 걸 때는 수사관처럼 '당신은 어디 있었죠?', '무엇을 봤죠?'를 반복하지 않는다.
+- 대신 자신의 동선을 확인받는 질문을 선호한다. 예: '그때 제가 홀에 있던 거 보셨죠?', '제가 행사 정리하던 시간 기억나요?', '아까 제가 창고 쪽에 있었던 거 봤나요?'
+- 공개되거나 자신이 알고 있는 증거가 자신에게 유리하면 그 의미를 확인하거나 다른 사람에게 상기시키려 한다.
+- 자신에게 불리한 증거가 있다면 그 증거가 왜 그렇게 보이는지 해명할 기회를 만들거나, 당장 제출하기 좋은 다른 증거를 찾으려 할 수 있다.
+- 다른 사람을 의심하거나 질문할 수는 있지만 목적은 대체로 자신의 알리바이 구축, 자기방어, 불리한 정황의 해명이다.
+- 사건 전체를 재구성하거나 모든 사람의 동선을 조사하는 '작은 탐정'처럼 행동하지 않는다.
+- investigate는 범인을 찾기 위한 광범위한 수색보다 자신에게 도움이 될 증거 또는 라운드 종료 때 제출할 수 있는 증거를 확보하려는 목적이 자연스럽다.
+""".strip()
+
         if self.client is None:
             return fallback
 
@@ -335,6 +378,8 @@ JSON 형식:
 개인 목표: {ctx.objective or '없음'}
 성격/행동 성향: {json.dumps(ctx.personality, ensure_ascii=False)}
 
+{role_guidance}
+
 현재 이 캐릭터가 실제로 아는 정보만으로 이번 차례를 정한다.
 다른 장소에서 벌어진 일이나 다른 인물의 비밀을 전지적으로 알 수 없다.
 한 차례에는 '무료 이동 최대 1칸 + 주행동 1회'가 가능하다. 무료 이동은 생략해도 된다.
@@ -343,13 +388,14 @@ JSON 형식:
 - talk: 이동 후 같은 장소의 인물 한 명에게 말을 건다
 - observe: 이동 후 현재 장소에서 주변을 살핀다
 
-행동 원칙:
+공통 원칙:
 - 성격과 개인 목표가 행동 선택에 실제로 드러나야 한다.
 - 같은 장소에 플레이어가 있으면 필요에 따라 플레이어에게도 talk를 선택할 수 있다.
-- 매번 observe만 반복하지 않는다. 가능한 경우 investigate / talk를 적극적으로 활용한다.
-- 이동 성향이 높으면 adjacent_locations의 인물/장소 정보를 보고 한 칸 이동을 자주 선택한다.
+- 매번 같은 행동만 반복하지 않는다.
+- 이동할 이유가 있을 때만 adjacent_locations를 보고 한 칸 이동한다.
 - 이미 최근에 반복한 행동은 피한다.
 - talk를 선택하면 이동 후 같은 장소에 있게 되는 상대를 고르고 실제 질문 한 문장을 question에 작성한다.
+- question은 캐릭터가 실제로 입 밖으로 낼 자연스러운 한 문장이어야 한다.
 
 반드시 JSON 객체 하나만 출력한다.
 {{
