@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../core/app_assets.dart';
-
 /// Character portrait backed by an individual generated raster file.
 ///
 /// The historical class name is kept so existing game UI call sites do not
@@ -20,9 +18,17 @@ class PixelAvatar extends StatelessWidget {
   final double size;
   final double borderRadius;
 
+  static const Map<String, String> _assets = {
+    'seo-yuna': 'assets/images/characters/seo_yuna.webp',
+    'han-jun': 'assets/images/characters/han_jun.webp',
+    'min-seoyeon': 'assets/images/characters/min_seoyeon.webp',
+    'yoon-jiho': 'assets/images/characters/yoon_jiho.webp',
+    'kang-haejin': 'assets/images/characters/kang_haejin.webp',
+  };
+
   @override
   Widget build(BuildContext context) {
-    final asset = AppAssets.characterForCode(code);
+    final asset = code == null ? null : _assets[code];
 
     Widget fallback() => Center(
           child: Text(
