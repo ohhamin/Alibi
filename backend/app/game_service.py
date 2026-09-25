@@ -666,6 +666,25 @@ class GameService:
                     state = deepcopy(_as_dict(session['public_state']))
                     await self._ensure_turn_order(cur, session, state)
 
+                    # Self-heal sessions persisted by the previous round-start
+                    # bug: the player was shown as current actor while their
+                    # action/movement counters were still zero.
+                    order = [str(value) for value in _as_list(state.get('actor_order'))]
+                    actor_index = int(state.get('actor_index', 0))
+                    player_id = str(session['player_character_id'] or '')
+                    if (
+                        player_id
+                        and actor_index < len(order)
+                        and order[actor_index] == player_id
+                    ):
+                        turn_key = f"{session['current_turn']}:{actor_index}"
+                        if state.get('player_turn_key') != turn_key:
+                            state['player_turn_key'] = turn_key
+                            state['actions_remaining'] = 2
+                            state['movement_remaining'] = 1
+                            state['current_actor_id'] = player_id
+                            state['current_actor_name'] = await self._player_name(cur, session)
+
                     conversation = _as_dict(state.get('active_conversation'))
                     if conversation:
                         if request.action_type == 'reply':
@@ -1755,6 +1774,29 @@ class GameService:
         if index >= len(order):
             await self._advance_round(cur, session, turn, state)
             await self._set_actor_preview(session, state)
+
+            # A new round can start with the player as the first actor.
+            # _advance_round resets movement/actions to zero, so initialize the
+            # player's two-action turn here instead of leaving the UI stuck.
+            if (
+                not _as_dict(state.get('active_conversation'))
+                and not _as_dict(state.get('pending_npc_question'))
+            ):
+                next_order = [str(value) for value in _as_list(state.get('actor_order'))]
+                next_index = int(state.get('actor_index', 0))
+                player_id = str(session['player_character_id'] or '')
+                if (
+                    player_id
+                    and next_index < len(next_order)
+                    and next_order[next_index] == player_id
+                ):
+                    turn_key = f"{session['current_turn']}:{next_index}"
+                    if state.get('player_turn_key') != turn_key:
+                        state['player_turn_key'] = turn_key
+                        state['actions_remaining'] = 2
+                        state['movement_remaining'] = 1
+                        state['current_actor_id'] = player_id
+                        state['current_actor_name'] = await self._player_name(cur, session)
             return
 
         actor_id = order[index]
@@ -1772,7 +1814,7 @@ class GameService:
             turn_key = f"{session['current_turn']}:{index}"
             if state.get('player_turn_key') != turn_key:
                 state['player_turn_key'] = turn_key
-                state['actions_remaining'] = 1
+                state['actions_remaining'] = 2
                 state['movement_remaining'] = 1
             return
 
