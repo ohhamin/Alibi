@@ -47,9 +47,13 @@ class _GameScreenState extends State<GameScreen> {
   List<Map<String, dynamic>> get _characterLocations =>
       ((_state['character_locations'] as List?) ?? const [])
           .cast<Map<String, dynamic>>();
-  List<Map<String, dynamic>> get _inventoryItems =>
-      ((_state['inventory_items'] as List?) ?? const [])
-          .cast<Map<String, dynamic>>();
+  List<Map<String, dynamic>> get _inventoryItems {
+    final topLevel = ((_state['inventory_items'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>();
+    if (topLevel.isNotEmpty) return topLevel;
+    return ((_publicState['inventory_items'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>();
+  }
   List<Map<String, dynamic>> get _playerActionHistory =>
       ((_state['player_action_history'] as List?) ?? const [])
           .cast<Map<String, dynamic>>();
@@ -435,57 +439,171 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   Future<void> _showClues() async {
+    final privateItems = _inventoryItems;
+    final publicItems = _clues;
+
+    Widget evidenceCard(
+      BuildContext context,
+      Map<String, dynamic> clue, {
+      required bool isPrivate,
+    }) {
+      return Card(
+        child: ListTile(
+          leading: _EvidenceThumb(
+            clueCode: clue['clue_code'] as String?,
+            size: 54,
+          ),
+          title: Text(clue['title'] as String? ?? '증거'),
+          subtitle: Text(clue['content'] as String? ?? ''),
+          trailing: Chip(
+            visualDensity: VisualDensity.compact,
+            label: Text(isPrivate ? '비공개' : '공개'),
+          ),
+        ),
+      );
+    }
+
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       builder: (context) => SafeArea(
         child: SizedBox(
-          height: MediaQuery.sizeOf(context).height * .72,
+          height: MediaQuery.sizeOf(context).height * .80,
           child: Column(
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+                padding: const EdgeInsets.fromLTRB(18, 16, 12, 10),
                 child: Row(
                   children: [
-                    Text(
-                      '공개 증거 수첩',
-                      style: Theme.of(context).textTheme.titleLarge,
+                    const Icon(
+                      Icons.inventory_2_outlined,
+                      color: AppTheme.brass,
                     ),
-                    const Spacer(),
-                    Text('${_clues.length}개'),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '증거 수첩',
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
+                          Text(
+                            '내 소지 증거와 모두에게 공개된 증거를 구분해 표시합니다.',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 0, 18, 10),
+                child: Row(
+                  children: [
+                    Chip(
+                      avatar: const Icon(Icons.lock_outline, size: 16),
+                      label: Text('내 소지 · 비공개 ${privateItems.length}'),
+                    ),
+                    const SizedBox(width: 8),
+                    Chip(
+                      avatar: const Icon(Icons.public, size: 16),
+                      label: Text('공개 ${publicItems.length}'),
+                    ),
                   ],
                 ),
               ),
               const Divider(height: 1),
               Expanded(
-                child: _clues.isEmpty
-                    ? const Center(child: Text('아직 확인한 증거가 없습니다.'))
-                    : ListView.separated(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: _clues.length,
-                        separatorBuilder: (_, _) =>
-                            const SizedBox(height: 10),
-                        itemBuilder: (context, index) {
-                          final clue = _clues[index];
-                          final holding = _inventoryItems.any(
-                            (item) =>
-                                item['clue_code'] == clue['clue_code'],
-                          );
-                          return Card(
-                            child: ListTile(
-                              leading: _EvidenceThumb(
-                                clueCode: clue['clue_code'] as String?,
-                                size: 54,
-                              ),
-                              title: Text(clue['title'] as String? ?? ''),
-                              subtitle: Text(clue['content'] as String? ?? ''),
-                              trailing: holding
-                                  ? const Chip(label: Text('소지 중'))
-                                  : null,
-                            ),
-                          );
-                        },
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 28),
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.lock_outline,
+                          size: 18,
+                          color: AppTheme.brass,
+                        ),
+                        const SizedBox(width: 7),
+                        Text(
+                          '내 소지 증거 · 비공개',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      '나만 알고 있는 증거입니다. 탐정에게 제출하거나 제시하면 모두에게 공개됩니다.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 10),
+                    if (privateItems.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 22),
+                        child: Center(
+                          child: Text('현재 소지 중인 비공개 증거가 없습니다.'),
+                        ),
+                      )
+                    else
+                      ...privateItems.map(
+                        (item) => Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: evidenceCard(
+                            context,
+                            item,
+                            isPrivate: true,
+                          ),
+                        ),
                       ),
+                    const SizedBox(height: 14),
+                    const Divider(),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.public,
+                          size: 18,
+                          color: AppTheme.brass,
+                        ),
+                        const SizedBox(width: 7),
+                        Text(
+                          '공개 증거',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      '탐정이 발견했거나 제출·제시되어 모두가 알게 된 증거입니다.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 10),
+                    if (publicItems.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 26),
+                        child: Center(
+                          child: Text('아직 공개된 증거가 없습니다.'),
+                        ),
+                      )
+                    else
+                      ...publicItems.map(
+                        (item) => Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: evidenceCard(
+                            context,
+                            item,
+                            isPrivate: false,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -1619,7 +1737,7 @@ class _GameScreenState extends State<GameScreen> {
             tooltip: '증거 수첩',
             onPressed: _showClues,
             icon: Badge(
-              label: Text('${_clues.length}'),
+              label: Text('${_inventoryItems.length + _clues.length}'),
               child: const Icon(Icons.inventory_2_outlined),
             ),
           ),
