@@ -4,6 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../core/api_client.dart';
 import '../core/app_theme.dart';
 import '../models/story.dart';
+import '../widgets/pixel_avatar.dart';
 import 'game_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -76,6 +77,11 @@ class _HomeScreenState extends State<HomeScreen> {
               ...choices.map(
                 (c) => Card(
                   child: ListTile(
+                    leading: PixelAvatar(
+                      name: c.displayName,
+                      code: c.code,
+                      size: 48,
+                    ),
                     title: Text(c.displayName),
                     subtitle: Text('${c.roleLabel}\n${c.publicBio}'),
                     isThreeLine: true,
