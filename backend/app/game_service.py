@@ -2715,15 +2715,15 @@ class GameService:
         state['pending_npc_question'] = None
 
     async def _detective_bonus_action(self, cur, session, turn, state) -> None:
+        # Ordinary detective bonus actions are searches only. Formal suspect
+        # interrogations happen privately at the end of rounds 2 and 5.
         await cur.execute(
             """
             select sc.id, sc.display_name, sc.code, sc.role_label,
-                   st.known_facts, cc.system_prompt, cc.personality,
-                   rc.world_prompt
+                   st.known_facts, rc.world_prompt
             from public.story_characters sc
             join game_private.session_character_states st
               on st.session_id = %s and st.character_id = sc.id
-            join game_private.character_configs cc on cc.character_id = sc.id
             join game_private.story_runtime_configs rc on rc.story_version_id = sc.story_version_id
             where sc.story_version_id = %s
               and (sc.role_label = '탐정' or sc.code = 'kang-haejin')
@@ -2738,9 +2738,11 @@ class GameService:
 
         await cur.execute(
             """
-            select content from game_private.agent_memories
+            select content
+            from game_private.agent_memories
             where session_id = %s and character_id = %s
-            order by created_at desc limit 15
+            order by created_at desc
+            limit 15
             """,
             (session['id'], detective['id']),
         )
@@ -2768,6 +2770,8 @@ class GameService:
             (session['id'],),
         )
         locations = list(await cur.fetchall())
+        if not locations:
+            return
 
         choice = await self.agent_service.choose_detective_bonus_action(
             DetectiveBonusContext(
@@ -2779,123 +2783,12 @@ class GameService:
                 locations=locations,
             )
         )
-        action_type = str(choice.get('action_type') or 'investigate')
-
-        if action_type == 'ask':
-            target_id = str(choice.get('target_character_id') or '')
-            valid_ids = {str(row['id']) for row in characters}
-            if target_id not in valid_ids and characters:
-                target_id = str(characters[0]['id'])
-            target = next((row for row in characters if str(row['id']) == target_id), None)
-            if target is None:
-                return
-            question = str(choice.get('question') or '').strip()
-            if not question:
-                question = '이번 사건에서 당신이 직접 본 것과 들은 것을 시간 순서대로 말해 주세요.'
-
-            if target_id == str(session['player_character_id']):
-                message = f"[탐정 추가 수사] {detective['display_name']}: {question}"
-                await self._insert_message(
-                    cur, session['id'], turn['id'], 'character', detective['id'], 'dialogue', message
-                )
-                await self._broadcast_memory(
-                    cur,
-                    session,
-                    turn,
-                    message,
-                    source_key=f"detective-bonus-question:{session['current_turn']}",
-                )
-                state['active_conversation'] = {
-                    'id': f"detective:{session['current_turn']}",
-                    'source': 'detective_bonus',
-                    'actor_id': str(detective['id']),
-                    'actor_name': detective['display_name'],
-                    'location_code': None,
-                    'exchange_count': 0,
-                    'max_exchanges': 3,
-                    'history': [{'speaker': detective['display_name'], 'text': question}],
-                }
-                return
-
-            await cur.execute(
-                """
-                select sc.id, sc.display_name,
-                       cc.system_prompt, cc.private_backstory, cc.objective,
-                       cc.personality, cc.initial_knowledge, cc.secrets, cc.lie_policy,
-                       st.known_facts, st.false_beliefs, st.memory_summary,
-                       rc.world_prompt
-                from public.story_characters sc
-                join game_private.character_configs cc on cc.character_id = sc.id
-                join game_private.session_character_states st
-                  on st.session_id = %s and st.character_id = sc.id
-                join game_private.story_runtime_configs rc on rc.story_version_id = sc.story_version_id
-                where sc.id = %s and sc.story_version_id = %s
-                """,
-                (session['id'], target_id, session['story_version_id']),
-            )
-            target_ctx = await cur.fetchone()
-            if target_ctx is None:
-                return
-            await cur.execute(
-                """
-                select content from game_private.agent_memories
-                where session_id = %s and character_id = %s
-                order by created_at desc limit 10
-                """,
-                (session['id'], target_id),
-            )
-            target_memories = [row['content'] for row in await cur.fetchall()]
-            target_memories.reverse()
-            reply = await self.agent_service.generate_reply(
-                AgentContext(
-                    world_prompt=target_ctx['world_prompt'],
-                    character_name=target_ctx['display_name'],
-                    system_prompt=target_ctx['system_prompt'],
-                    private_backstory=target_ctx['private_backstory'],
-                    objective=target_ctx['objective'],
-                    personality=_as_dict(target_ctx['personality']),
-                    initial_knowledge=_as_list(target_ctx['initial_knowledge']),
-                    secrets=_as_list(target_ctx['secrets']),
-                    lie_policy=_as_dict(target_ctx['lie_policy']),
-                    known_facts=_as_list(target_ctx['known_facts']),
-                    false_beliefs=_as_list(target_ctx['false_beliefs']),
-                    memory_summary=target_ctx['memory_summary'],
-                    memories=target_memories,
-                    player_name=detective['display_name'],
-                    question=question,
-                )
-            )
-            public_text = (
-                f"[탐정 추가 수사] {detective['display_name']}이(가) "
-                f"{target_ctx['display_name']}에게 '{question}'라고 물었다. "
-                f"{target_ctx['display_name']}: {reply}"
-            )
-            await self._remember(
-                cur,
-                session['id'],
-                detective['id'],
-                turn['id'],
-                'testimony',
-                f"{target_ctx['display_name']}의 공개 진술: {reply}",
-                f"detective-bonus-testimony:{session['current_turn']}:{target_id}",
-                salience=95,
-            )
-            await self._broadcast_memory(
-                cur,
-                session,
-                turn,
-                public_text,
-                source_key=f"detective-bonus-public:{session['current_turn']}:{target_id}",
-            )
-            await self._insert_message(
-                cur, session['id'], turn['id'], 'narrator', None, 'narration', public_text
-            )
-            return
-
         target_code = str(choice.get('target_location_code') or '')
         valid_codes = {str(row['code']) for row in locations}
-        if target_code not in valid_codes and locations:
-            target_code = str(locations[0]['code'])
+        if target_code not in valid_codes:
+            # Asking suspects is reserved for the private round-2/5 sessions.
+            # If the model suggested an interview here, fall back to a search.
+            target_code = str(locations[(int(session['current_turn']) - 1) % len(locations)]['code'])
         target_loc = next((row for row in locations if str(row['code']) == target_code), None)
         if target_loc is None:
             return
@@ -2908,19 +2801,35 @@ class GameService:
             where c.story_version_id = %s
               and l.code = %s
               and coalesce((c.reveal_rule->>'min_round')::int, 1) <= %s
+              and (
+                c.reveal_rule->>'character' is null
+                or exists (
+                    select 1
+                    from game_private.session_character_states st2
+                    join public.story_characters sc2 on sc2.id = st2.character_id
+                    where st2.session_id = %s
+                      and st2.location_code = %s
+                      and sc2.code = c.reveal_rule->>'character'
+                )
+              )
               and not exists (
-                select 1 from game_private.internal_events ie
+                select 1
+                from game_private.session_evidence_holdings h
+                where h.session_id = %s and h.clue_code = c.code
+              )
+              and not exists (
+                select 1
+                from public.session_clues pc
+                where pc.session_id = %s and pc.clue_code = c.code
+              )
+              and not exists (
+                select 1
+                from game_private.internal_events ie
                 where ie.session_id = %s
                   and ie.event_type in ('clue_hidden', 'clue_taken')
                   and ie.payload->>'clue_code' = c.code
               )
-              and not exists (
-                select 1 from game_private.agent_memories am
-                where am.session_id = %s
-                  and am.character_id = %s
-                  and am.source_key = 'detective-bonus-clue:' || c.code
-              )
-            order by c.importance desc, c.created_at
+            order by random()
             limit 1
             """,
             (
@@ -2928,12 +2837,30 @@ class GameService:
                 target_code,
                 session['current_turn'],
                 session['id'],
+                target_code,
                 session['id'],
-                detective['id'],
+                session['id'],
+                session['id'],
             ),
         )
         clue = await cur.fetchone()
         if clue:
+            await cur.execute(
+                """
+                insert into game_private.session_evidence_holdings
+                  (session_id, clue_code, holder_character_id, acquired_round,
+                   acquisition_type, status, disclosed_round, disclosed_at)
+                values (%s, %s, %s, %s, 'detective_search', 'public', %s, now())
+                on conflict (session_id, clue_code) do nothing
+                """,
+                (
+                    session['id'],
+                    clue['code'],
+                    detective['id'],
+                    session['current_turn'],
+                    session['current_turn'],
+                ),
+            )
             fact = f"{clue['player_title']}: {clue['player_text']}"
             await self._remember(
                 cur,
@@ -2945,38 +2872,29 @@ class GameService:
                 f"detective-bonus-clue:{clue['code']}",
                 salience=100,
             )
-            await cur.execute(
-                """
-                insert into public.session_clues
-                  (session_id, clue_code, title, content, category, discovered_turn)
-                values (%s, %s, %s, %s, %s, %s)
-                on conflict (session_id, clue_code) do nothing
-                """,
-                (
-                    session['id'], clue['code'], clue['player_title'],
-                    clue['player_text'], clue['category'], session['current_turn'],
-                ),
-            )
-            public_text = (
-                f"[탐정 추가 수사] {detective['display_name']}이(가) "
-                f"{target_loc['name']}을(를) 조사해 {clue['player_title']}을(를) 확인했다. "
-                f"{clue['player_text']}"
+            await self._publish_evidence(
+                cur,
+                session,
+                turn,
+                state,
+                str(clue['code']),
+                str(detective['id']),
+                source='detective_search',
             )
         else:
             public_text = (
                 f"[탐정 추가 수사] {detective['display_name']}이(가) "
-                f"{target_loc['name']}을(를) 추가 조사했지만 새로운 단서는 확인하지 못했다."
+                f"{target_loc['name']}을(를) 조사했지만 새 증거는 찾지 못했다."
             )
-        await self._broadcast_memory(
-            cur,
-            session,
-            turn,
-            public_text,
-            source_key=f"detective-bonus-investigate:{session['current_turn']}:{target_code}",
-        )
-        await self._insert_message(
-            cur, session['id'], turn['id'], 'narrator', None, 'narration', public_text
-        )
+            await self._insert_message(
+                cur,
+                session['id'],
+                turn['id'],
+                'narrator',
+                None,
+                'narration',
+                public_text,
+            )
 
     async def _broadcast_memory(
         self,
@@ -3156,18 +3074,23 @@ class GameService:
                 )
               )
               and not exists (
-                select 1 from game_private.internal_events ie
+                select 1
+                from game_private.session_evidence_holdings h
+                where h.session_id = %s and h.clue_code = c.code
+              )
+              and not exists (
+                select 1
+                from public.session_clues pc
+                where pc.session_id = %s and pc.clue_code = c.code
+              )
+              and not exists (
+                select 1
+                from game_private.internal_events ie
                 where ie.session_id = %s
                   and ie.event_type in ('clue_hidden', 'clue_taken')
                   and ie.payload->>'clue_code' = c.code
               )
-              and not exists (
-                select 1 from game_private.agent_memories am
-                where am.session_id = %s
-                  and am.character_id = %s
-                  and am.source_key = 'npc-clue:' || c.code
-              )
-            order by c.importance desc, c.created_at
+            order by random()
             limit 1
             """,
             (
@@ -3178,44 +3101,74 @@ class GameService:
                 location_code,
                 session['id'],
                 session['id'],
-                actor['id'],
+                session['id'],
             ),
         )
         clue = await cur.fetchone()
-        if clue is None:
-            content = f"{actor['display_name']}이(가) 주변을 조사했지만 새로운 단서를 찾지 못했다."
-        else:
-            content = f"{actor['display_name']}이(가) {clue['player_title']}을(를) 확인했다."
-            fact = f"{clue['player_title']}: {clue['player_text']}"
-            await self._remember(
-                cur,
-                session['id'],
-                actor['id'],
-                turn['id'],
-                'clue',
-                fact,
-                f"npc-clue:{clue['code']}",
-                salience=90,
+        public_observation = (
+            f"{actor['display_name']}이(가) 주변을 조사했지만 새로운 단서를 찾지 못했다."
+        )
+        private_result = public_observation
+
+        if clue is not None:
+            await cur.execute(
+                """
+                insert into game_private.session_evidence_holdings
+                  (session_id, clue_code, holder_character_id, acquired_round, acquisition_type, status)
+                values (%s, %s, %s, %s, 'npc_search', 'held')
+                on conflict (session_id, clue_code) do nothing
+                returning clue_code
+                """,
+                (
+                    session['id'],
+                    clue['code'],
+                    actor['id'],
+                    session['current_turn'],
+                ),
             )
-            facts = _as_list(actor['known_facts'])
-            if fact not in facts:
-                facts.append(fact)
-                actor['known_facts'] = facts
-                await cur.execute(
-                    """
-                    update game_private.session_character_states
-                    set known_facts = %s, last_turn_processed = %s, updated_at = now()
-                    where session_id = %s and character_id = %s
-                    """,
-                    (Jsonb(facts), session['current_turn'], session['id'], actor['id']),
+            acquired = await cur.fetchone()
+            if acquired:
+                fact = f"{clue['player_title']}: {clue['player_text']}"
+                private_result = (
+                    f"{actor['display_name']}이(가) {clue['player_title']}을(를) 찾아 비공개로 소지했다."
                 )
+                public_observation = (
+                    f"{actor['display_name']}이(가) 주변에서 무언가를 찾아 챙겼다."
+                )
+                await self._remember(
+                    cur,
+                    session['id'],
+                    actor['id'],
+                    turn['id'],
+                    'clue',
+                    fact,
+                    f"npc-clue:{clue['code']}",
+                    salience=90,
+                )
+                facts = _as_list(actor['known_facts'])
+                if fact not in facts:
+                    facts.append(fact)
+                    actor['known_facts'] = facts
+                    await cur.execute(
+                        """
+                        update game_private.session_character_states
+                        set known_facts = %s, last_turn_processed = %s, updated_at = now()
+                        where session_id = %s and character_id = %s
+                        """,
+                        (Jsonb(facts), session['current_turn'], session['id'], actor['id']),
+                    )
 
         await self._insert_internal_event(
             cur,
             session,
             'npc_investigate',
             actor_character_id=actor['id'],
-            payload={'location_code': location_code, 'intent': intent, 'result': content},
+            payload={
+                'location_code': location_code,
+                'intent': intent,
+                'result': private_result,
+                'clue_code': clue['code'] if clue is not None else None,
+            },
         )
         await self._insert_message(
             cur,
@@ -3224,7 +3177,7 @@ class GameService:
             'narrator',
             None,
             'narration',
-            content if state.get('current_location') == location_code
+            public_observation if state.get('current_location') == location_code
             else f"{actor['display_name']}이(가) 행동을 했다.",
         )
         await self._record_witnesses(
@@ -3232,7 +3185,7 @@ class GameService:
             session,
             turn,
             location_code,
-            content,
+            public_observation,
             source_key=f"npc-investigate:{session['current_turn']}:{actor['id']}",
             exclude_ids={str(actor['id'])},
         )
