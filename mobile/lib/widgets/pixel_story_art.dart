@@ -3,10 +3,9 @@ import 'package:flutter/material.dart';
 import '../core/app_assets.dart';
 import 'sheet_crop_image.dart';
 
-/// Location/evidence artwork backed by generated raster files.
+/// Location/evidence artwork backed only by generated raster image files.
 ///
-/// The old public class names are kept for compatibility, but no CustomPainter
-/// vector/pixel drawing remains here.
+/// The old class names are retained for compatibility with existing game UI.
 class PixelLocationArt extends StatelessWidget {
   const PixelLocationArt({
     super.key,
@@ -17,27 +16,22 @@ class PixelLocationArt extends StatelessWidget {
   final String? locationCode;
   final double height;
 
-  static const Map<String, Rect> _locationCrops = {
-    'hall': Rect.fromLTWH(0.010, 0.012, 0.335, 0.438),
-    'cafe': Rect.fromLTWH(0.353, 0.012, 0.305, 0.438),
-    'office': Rect.fromLTWH(0.667, 0.012, 0.323, 0.438),
-    'storage': Rect.fromLTWH(0.010, 0.510, 0.480, 0.438),
-    'back-alley': Rect.fromLTWH(0.505, 0.510, 0.485, 0.438),
-  };
-
   @override
   Widget build(BuildContext context) {
-    final crop = _locationCrops[locationCode] ?? _locationCrops['hall']!;
+    final asset = AppAssets.locationForCode(locationCode) ??
+        AppAssets.locationForCode('hall')!;
 
-    return SizedBox(
-      width: double.infinity,
-      height: height,
-      child: SheetCropImage(
-        asset: AppAssets.locationSheet,
-        crop: crop,
-        fit: BoxFit.cover,
-        filterQuality: FilterQuality.high,
-        borderRadius: BorderRadius.circular(10),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: SizedBox(
+        width: double.infinity,
+        height: height,
+        child: Image.asset(
+          asset,
+          fit: BoxFit.cover,
+          filterQuality: FilterQuality.high,
+          gaplessPlayback: true,
+        ),
       ),
     );
   }
@@ -53,56 +47,23 @@ class PixelEvidenceArt extends StatelessWidget {
   final String? clueCode;
   final double size;
 
-  // The generated evidence board is a 4 x 2 composition.
-  // Crops focus on the photographed object/paper, not the board labels.
+  // 2560 x 1024 raster board: five 512px evidence images per row.
   static const Map<String, Rect> _crops = {
-    'clue-safe-key': Rect.fromLTWH(0.025, 0.105, 0.205, 0.315),
-    'clue-coffee-receipt': Rect.fromLTWH(0.280, 0.105, 0.205, 0.315),
-    'clue-expense': Rect.fromLTWH(0.525, 0.105, 0.205, 0.315),
-    'clue-bookend': Rect.fromLTWH(0.770, 0.105, 0.205, 0.315),
-    'clue-contract': Rect.fromLTWH(0.025, 0.600, 0.205, 0.315),
-    'clue-door-lock': Rect.fromLTWH(0.280, 0.600, 0.205, 0.315),
-    'clue-drain-button': Rect.fromLTWH(0.525, 0.600, 0.205, 0.315),
-    'clue-manuscript': Rect.fromLTWH(0.770, 0.600, 0.205, 0.315),
+    'clue-safe-key': Rect.fromLTWH(0.0, 0.0, 0.2, 0.5),
+    'clue-coffee-receipt': Rect.fromLTWH(0.2, 0.0, 0.2, 0.5),
+    'clue-expense': Rect.fromLTWH(0.4, 0.0, 0.2, 0.5),
+    'clue-bookend': Rect.fromLTWH(0.6, 0.0, 0.2, 0.5),
+    'clue-contract': Rect.fromLTWH(0.8, 0.0, 0.2, 0.5),
+    'clue-door-lock': Rect.fromLTWH(0.0, 0.5, 0.2, 0.5),
+    'clue-drain-button': Rect.fromLTWH(0.2, 0.5, 0.2, 0.5),
+    'clue-manuscript': Rect.fromLTWH(0.4, 0.5, 0.2, 0.5),
+    'clue-body-time': Rect.fromLTWH(0.6, 0.5, 0.2, 0.5),
+    'clue-brass-dust': Rect.fromLTWH(0.8, 0.5, 0.2, 0.5),
   };
 
   @override
   Widget build(BuildContext context) {
-    final crop = _crops[clueCode];
-
-    Widget image;
-    if (crop != null) {
-      image = SheetCropImage(
-        asset: AppAssets.evidenceSheet,
-        crop: crop,
-        fit: BoxFit.cover,
-        filterQuality: FilterQuality.high,
-      );
-    } else if (clueCode == 'clue-body-time') {
-      // Until a dedicated watch close-up is added, use the real office scene
-      // rather than falling back to generated geometry.
-      image = const SheetCropImage(
-        asset: AppAssets.locationSheet,
-        crop: Rect.fromLTWH(0.710, 0.090, 0.220, 0.300),
-        fit: BoxFit.cover,
-        filterQuality: FilterQuality.high,
-      );
-    } else if (clueCode == 'clue-brass-dust') {
-      // The brass trace belongs to the weapon context; keep this raster-only.
-      image = const SheetCropImage(
-        asset: AppAssets.evidenceSheet,
-        crop: Rect.fromLTWH(0.770, 0.105, 0.205, 0.315),
-        fit: BoxFit.cover,
-        filterQuality: FilterQuality.high,
-      );
-    } else {
-      image = const SheetCropImage(
-        asset: AppAssets.evidenceSheet,
-        crop: Rect.fromLTWH(0.025, 0.105, 0.205, 0.315),
-        fit: BoxFit.cover,
-        filterQuality: FilterQuality.high,
-      );
-    }
+    final crop = _crops[clueCode] ?? _crops['clue-safe-key']!;
 
     return Container(
       width: size,
@@ -113,7 +74,14 @@ class PixelEvidenceArt extends StatelessWidget {
         border: Border.all(color: const Color(0xFF343840)),
       ),
       clipBehavior: Clip.antiAlias,
-      child: image,
+      child: SheetCropImage(
+        asset: AppAssets.evidenceSheet,
+        crop: crop,
+        sheetWidth: 2560,
+        sheetHeight: 1024,
+        fit: BoxFit.cover,
+        filterQuality: FilterQuality.high,
+      ),
     );
   }
 }
