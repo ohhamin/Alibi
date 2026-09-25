@@ -1638,10 +1638,10 @@ class GameService:
         if actor is None or not actor['location_code']:
             return
 
-        current_code = actor['location_code']
+        current_code = str(actor['location_code'])
         await cur.execute(
             """
-            select player_name, metadata
+            select code, player_name, metadata
             from game_private.story_locations
             where story_version_id = %s and code = %s
             """,
@@ -1661,27 +1661,36 @@ class GameService:
             where l.story_version_id = %s and l.code = any(%s)
             order by l.player_name
             """,
-            (
-                session['id'],
-                session['story_version_id'],
-                adjacent_codes or ['__none__'],
-            ),
+            (session['id'], session['story_version_id'], adjacent_codes or ['__none__']),
         )
         adjacent_locations = list(await cur.fetchall())
 
         await cur.execute(
             """
-            select sc.id, sc.code, sc.display_name, sc.role_label
+            select sc.id, sc.code, sc.display_name, sc.role_label, st.location_code
             from game_private.session_character_states st
             join public.story_characters sc on sc.id = st.character_id
             where st.session_id = %s
-              and st.location_code = %s
-              and sc.id <> %s
             order by sc.sort_order
             """,
-            (session['id'], current_code, actor['id']),
+            (session['id'],),
         )
-        same_room = list(await cur.fetchall())
+        positions = list(await cur.fetchall())
+        same_room = [
+            row for row in positions
+            if str(row['location_code']) == current_code and str(row['id']) != str(actor['id'])
+        ]
+        for destination in adjacent_locations:
+            destination['characters'] = [
+                {
+                    'id': str(row['id']),
+                    'display_name': row['display_name'],
+                    'role_label': row['role_label'],
+                }
+                for row in positions
+                if str(row['location_code']) == str(destination['code'])
+                and str(row['id']) != str(actor['id'])
+            ]
 
         await cur.execute(
             """
@@ -1689,7 +1698,7 @@ class GameService:
             from game_private.agent_memories
             where session_id = %s and character_id = %s
             order by created_at desc
-            limit 10
+            limit 8
             """,
             (session['id'], actor['id']),
         )
@@ -1715,50 +1724,46 @@ class GameService:
             )
         )
 
+        player_location = str(state.get('current_location') or '')
+        move_to = str(choice.get('move_to') or '').strip()
+        valid_move_codes = {str(row['code']) for row in adjacent_locations}
+        if move_to and move_to in valid_move_codes:
+            origin_code = current_code
+            origin_name = loc['player_name']
+            target_loc = next(row for row in adjacent_locations if str(row['code']) == move_to)
+            target_name = target_loc['player_name']
+            await cur.execute(
+                """
+                update game_private.session_character_states
+                set location_code = %s, last_turn_processed = %s, updated_at = now()
+                where session_id = %s and character_id = %s
+                """,
+                (move_to, session['current_turn'], session['id'], actor['id']),
+            )
+            exact_move = f"{actor['display_name']}이(가) {origin_name}에서 {target_name}(으)로 이동했다."
+            await self._insert_internal_event(
+                cur, session, 'npc_move', actor_character_id=actor['id'],
+                payload={'from': origin_code, 'to': move_to, 'intent': choice.get('intent')},
+            )
+            await self._record_npc_action_memories(
+                cur, session, turn, actor, origin_code, move_to, exact_move
+            )
+            if player_location in {origin_code, move_to}:
+                await self._insert_message(
+                    cur, session['id'], turn['id'], 'narrator', None, 'narration', exact_move
+                )
+            current_code = move_to
+            loc = {'code': move_to, 'player_name': target_name}
+            for row in positions:
+                if str(row['id']) == str(actor['id']):
+                    row['location_code'] = move_to
+            same_room = [
+                row for row in positions
+                if str(row['location_code']) == current_code and str(row['id']) != str(actor['id'])
+            ]
+
         action_type = str(choice.get('action_type') or 'observe')
         intent = str(choice.get('intent') or '주변 상황을 살핀다.')
-        player_location = str(state.get('current_location') or '')
-
-        if action_type == 'move':
-            target_code = str(choice.get('target_location_code') or '')
-            valid_codes = {str(row['code']) for row in adjacent_locations}
-            if target_code in valid_codes:
-                await cur.execute(
-                    """
-                    update game_private.session_character_states
-                    set location_code = %s, last_turn_processed = %s, updated_at = now()
-                    where session_id = %s and character_id = %s
-                    """,
-                    (target_code, session['current_turn'], session['id'], actor['id']),
-                )
-                target_loc = next(
-                    (row for row in adjacent_locations if str(row['code']) == target_code),
-                    None,
-                )
-                target_name = target_loc['player_name'] if target_loc else target_code
-                exact = f"{actor['display_name']}이(가) {loc['player_name']}에서 {target_name}(으)로 이동했다."
-                await self._insert_internal_event(
-                    cur,
-                    session,
-                    'npc_move',
-                    actor_character_id=actor['id'],
-                    payload={'from': current_code, 'to': target_code, 'intent': intent},
-                )
-                await self._insert_message(
-                    cur,
-                    session['id'],
-                    turn['id'],
-                    'narrator',
-                    None,
-                    'narration',
-                    exact if player_location in {current_code, target_code}
-                    else f"{actor['display_name']}이(가) 행동을 했다.",
-                )
-                await self._record_npc_action_memories(
-                    cur, session, turn, actor, current_code, target_code, exact
-                )
-                return
-            action_type = 'observe'
 
         if action_type == 'investigate':
             await self._npc_investigate(cur, session, turn, state, actor, current_code, intent)
@@ -1772,42 +1777,32 @@ class GameService:
                 if target_id == str(session['player_character_id']):
                     question = str(choice.get('question') or '').strip()
                     if not question:
-                        question = f"{intent} 지금 알고 있는 걸 솔직히 말해줄래?"
+                        question = f"{intent} 지금 네가 아는 걸 말해줄래?"
                     await self._insert_internal_event(
-                        cur,
-                        session,
-                        'npc_asks_player',
-                        actor_character_id=actor['id'],
-                        target_character_id=target_id,
+                        cur, session, 'npc_asks_player',
+                        actor_character_id=actor['id'], target_character_id=target_id,
                         payload={'location_code': current_code, 'question': question, 'intent': intent},
                     )
                     await self._insert_message(
-                        cur,
-                        session['id'],
-                        turn['id'],
-                        'character',
-                        actor['id'],
-                        'dialogue',
-                        question,
+                        cur, session['id'], turn['id'], 'character', actor['id'], 'dialogue', question
                     )
-                    state['pending_npc_question'] = {
+                    state['active_conversation'] = {
+                        'id': f"npc:{session['current_turn']}:{actor['id']}",
+                        'source': 'npc_initiated',
                         'actor_id': str(actor['id']),
                         'actor_name': actor['display_name'],
-                        'question': question,
-                        'source': 'actor_turn',
                         'location_code': current_code,
+                        'exchange_count': 0,
+                        'max_exchanges': 3,
+                        'history': [{'speaker': actor['display_name'], 'text': question}],
                     }
                     await self._record_witnesses(
-                        cur,
-                        session,
-                        turn,
-                        current_code,
-                        f"{actor['display_name']}이(가) 플레이어에게 '{question}'라고 물었다.",
+                        cur, session, turn, current_code,
+                        f"{actor['display_name']}: {question}",
                         source_key=f"npc-question:{session['current_turn']}:{actor['id']}",
                         exclude_ids={str(actor['id'])},
                     )
                     return
-
                 await self._npc_talk(
                     cur, session, turn, state, actor, target, current_code, intent
                 )
@@ -1816,30 +1811,16 @@ class GameService:
 
         content = f"{actor['display_name']}이(가) {loc['player_name']}에서 주변 상황을 살폈다."
         await self._insert_internal_event(
-            cur,
-            session,
-            'npc_observe',
-            actor_character_id=actor['id'],
+            cur, session, 'npc_observe', actor_character_id=actor['id'],
             payload={'location_code': current_code, 'intent': intent},
         )
         await self._remember(
-            cur,
-            session['id'],
-            actor['id'],
-            turn['id'],
-            'observation',
-            content,
+            cur, session['id'], actor['id'], turn['id'], 'observation', content,
             f"npc-observe:{session['current_turn']}:{actor['id']}",
         )
         await self._insert_message(
-            cur,
-            session['id'],
-            turn['id'],
-            'narrator',
-            None,
-            'narration',
-            content if player_location == current_code
-            else f"{actor['display_name']}이(가) 행동을 했다.",
+            cur, session['id'], turn['id'], 'narrator', None, 'narration',
+            content if player_location == current_code else f"{actor['display_name']}이(가) 행동을 했다.",
         )
 
     async def _handle_reply(
