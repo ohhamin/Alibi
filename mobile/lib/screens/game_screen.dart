@@ -23,6 +23,7 @@ class _GameScreenState extends State<GameScreen> {
   bool _busy = false;
   bool _autoAdvanceScheduled = false;
   bool _conversationSheetOpen = false;
+  bool _conversationMinimized = false;
   bool _submissionSheetOpen = false;
 
   Map<String, dynamic> get _session =>
@@ -133,11 +134,14 @@ class _GameScreenState extends State<GameScreen> {
 
     if (_submissionSheetOpen) return;
 
-    if (_activeConversation != null && !_conversationSheetOpen) {
+    if (_activeConversation != null &&
+        !_conversationSheetOpen &&
+        !_conversationMinimized) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted &&
             _activeConversation != null &&
             !_conversationSheetOpen &&
+            !_conversationMinimized &&
             !_submissionSheetOpen) {
           _openConversationSheet();
         }
@@ -1253,6 +1257,7 @@ class _GameScreenState extends State<GameScreen> {
       return;
     }
     _conversationSheetOpen = true;
+    _conversationMinimized = false;
     final replyController = TextEditingController();
 
     await showModalBottomSheet<void>(
@@ -1288,6 +1293,9 @@ class _GameScreenState extends State<GameScreen> {
               conversation['source'] == 'detective_interrogation';
 
           Future<void> refreshAfter(Future<void> task) async {
+            if (sheetContext.mounted) {
+              setSheetState(() {});
+            }
             await task;
             if (!sheetContext.mounted) return;
             if (_activeConversation == null) {
@@ -1325,6 +1333,16 @@ class _GameScreenState extends State<GameScreen> {
                                 .titleLarge,
                           ),
                         ),
+                        IconButton(
+                          tooltip: '대화창 잠시 내리기',
+                          onPressed: _busy
+                              ? null
+                              : () {
+                                  _conversationMinimized = true;
+                                  Navigator.pop(sheetContext);
+                                },
+                          icon: const Icon(Icons.keyboard_arrow_down),
+                        ),
                         Chip(label: Text('왕복 $exchange / $maxExchange')),
                       ],
                     ),
@@ -1339,7 +1357,48 @@ class _GameScreenState extends State<GameScreen> {
                                 '같은 방의 인물은 내용을 모두 듣습니다.',
                       ),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: 8),
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 180),
+                      child: _busy
+                          ? Container(
+                              key: const ValueKey('conversation-loading'),
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 10,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppTheme.brass.withValues(alpha: .08),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color:
+                                      AppTheme.brass.withValues(alpha: .20),
+                                ),
+                              ),
+                              child: const Row(
+                                children: [
+                                  SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  ),
+                                  SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      '상대가 답변을 정리하고 있습니다...',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : const SizedBox.shrink(
+                              key: ValueKey('conversation-idle'),
+                            ),
+                    ),
+                    const SizedBox(height: 8),
                     const Divider(height: 1),
                     Expanded(
                       child: ListView.builder(
@@ -1500,6 +1559,9 @@ class _GameScreenState extends State<GameScreen> {
 
     replyController.dispose();
     _conversationSheetOpen = false;
+    if (_activeConversation == null) {
+      _conversationMinimized = false;
+    }
     _afterStateChanged();
   }
 
@@ -1607,6 +1669,33 @@ class _GameScreenState extends State<GameScreen> {
                   '${pending['actor_name'] ?? '인물'}의 질문',
                 ),
                 subtitle: Text(pending['question'] as String? ?? ''),
+              ),
+            ),
+          if (_activeConversation != null &&
+              _conversationMinimized &&
+              !_completed)
+            Card(
+              margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: ListTile(
+                leading: const Icon(
+                  Icons.forum_outlined,
+                  color: AppTheme.brass,
+                ),
+                title: Text(
+                  '${_activeConversation?['actor_name'] ?? '인물'}과 대화 진행 중',
+                ),
+                subtitle: const Text(
+                  '다른 화면을 확인할 수 있습니다. 행동을 넘기려면 먼저 대화를 종료해야 합니다.',
+                ),
+                trailing: TextButton(
+                  onPressed: _busy
+                      ? null
+                      : () {
+                          setState(() => _conversationMinimized = false);
+                          _openConversationSheet();
+                        },
+                  child: const Text('대화로 돌아가기'),
+                ),
               ),
             ),
           Expanded(
