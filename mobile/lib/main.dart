@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'core/app_assets.dart';
 import 'core/app_config.dart';
 import 'core/app_theme.dart';
 import 'screens/home_screen.dart';
@@ -24,7 +25,58 @@ class AlibiApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'ALIBI',
       theme: AppTheme.dark,
-      home: const AuthGate(),
+      home: const SplashGate(),
+    );
+  }
+}
+
+class SplashGate extends StatefulWidget {
+  const SplashGate({super.key});
+
+  @override
+  State<SplashGate> createState() => _SplashGateState();
+}
+
+class _SplashGateState extends State<SplashGate> {
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    Future<void>.delayed(const Duration(milliseconds: 850), () {
+      if (mounted) setState(() => _ready = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 260),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      child: _ready
+          ? const AuthGate(key: ValueKey('auth'))
+          : Scaffold(
+              key: const ValueKey('splash'),
+              backgroundColor: const Color(0xFF08090A),
+              body: SizedBox.expand(
+                child: Image.asset(
+                  AppAssets.loading,
+                  fit: BoxFit.cover,
+                  filterQuality: FilterQuality.none,
+                  errorBuilder: (_, _, _) => const Center(
+                    child: Text(
+                      'ALIBI',
+                      style: TextStyle(
+                        fontSize: 34,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 8,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
     );
   }
 }
