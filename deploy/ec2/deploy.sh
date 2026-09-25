@@ -14,7 +14,11 @@ if [[ ! -f backend/.env.production ]]; then
   exit 1
 fi
 
-docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+if ! docker compose -f docker-compose.prod.yml up -d --build --remove-orphans; then
+  echo "Compose build failed; falling back to the legacy Docker builder."
+  DOCKER_BUILDKIT=0 docker build -t alibi-backend ./backend
+  docker compose -f docker-compose.prod.yml up -d --no-build --remove-orphans
+fi
 
 echo "Waiting for backend health..."
 for i in {1..20}; do
