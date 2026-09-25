@@ -1266,7 +1266,7 @@ class GameService:
         if int(state.get('detective_bonus_done_round', 0)) != current_round:
             await self._detective_bonus_action(cur, session, turn, state)
             state['detective_bonus_done_round'] = current_round
-            if _as_dict(state.get('pending_npc_question')):
+            if _as_dict(state.get('active_conversation')) or _as_dict(state.get('pending_npc_question')):
                 return
 
         await cur.execute(
@@ -1284,6 +1284,9 @@ class GameService:
         state['round'] = next_round
         state['actor_index'] = 0
         state['actions_remaining'] = 0
+        state['movement_remaining'] = 0
+        state['player_turn_key'] = None
+        state['active_conversation'] = None
         state['current_actor_id'] = None
         state['current_actor_name'] = None
         state['pending_npc_question'] = None
