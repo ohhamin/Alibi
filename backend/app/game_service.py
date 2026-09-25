@@ -659,18 +659,25 @@ class GameService:
         )
 
     async def _handle_move(self, cur, session, turn, state, request, client_action_id: str) -> bool:
+        if int(state.get('movement_remaining', 0)) <= 0:
+            await self._insert_message(
+                cur, session['id'], turn['id'], 'system', None, 'system',
+                '이번 차례의 무료 이동은 이미 사용했습니다.'
+            )
+            return False
+
         location_code = str(request.payload.get('location_code') or '').strip()
         current_code = str(state.get('current_location') or '').strip()
         if not location_code:
             await self._insert_message(
                 cur, session['id'], turn['id'], 'system', None, 'system',
-                '이동할 장소를 선택해 주세요. 행동은 소모되지 않았습니다.'
+                '이동할 장소를 선택해 주세요.'
             )
             return False
         if location_code == current_code:
             await self._insert_message(
                 cur, session['id'], turn['id'], 'system', None, 'system',
-                '이미 그 장소에 있습니다. 행동은 소모되지 않았습니다.'
+                '이미 그 장소에 있습니다.'
             )
             return False
 
@@ -688,7 +695,7 @@ class GameService:
         if location is None:
             await self._insert_message(
                 cur, session['id'], turn['id'], 'system', None, 'system',
-                '아직 갈 수 없는 장소입니다. 행동은 소모되지 않았습니다.'
+                '아직 갈 수 없는 장소입니다.'
             )
             return False
 
@@ -705,40 +712,24 @@ class GameService:
         if location_code not in adjacent:
             await self._insert_message(
                 cur, session['id'], turn['id'], 'system', None, 'system',
-                '현재 위치에서 바로 이동할 수 없는 장소입니다. 행동은 소모되지 않았습니다.'
+                '한 번에는 연결된 장소 한 칸만 이동할 수 있습니다.'
             )
             return False
 
         await self._insert_action(
-            cur,
-            client_action_id,
-            session['id'],
-            turn['id'],
-            request,
-            payload={'location_code': location_code},
+            cur, client_action_id, session['id'], turn['id'], request,
+            payload={'location_code': location_code, 'free_move': True},
         )
-        await self._insert_message(
-            cur,
-            session['id'],
-            turn['id'],
-            'player',
-            session['player_character_id'],
-            'choice_result',
-            f"{location['name']}으로 이동한다.",
-        )
-
         player_name = await self._player_name(cur, session)
         await self._record_witnesses(
-            cur,
-            session,
-            turn,
-            current_code,
+            cur, session, turn, current_code,
             f"{player_name}이(가) {location['name']} 쪽으로 이동하는 것을 보았다.",
             source_key=f"player-move-leave:{client_action_id}",
         )
 
         state['current_location'] = location_code
         state['current_location_name'] = location['name']
+        state['movement_remaining'] = 0
         if session['player_character_id']:
             await cur.execute(
                 """
@@ -750,25 +741,16 @@ class GameService:
             )
 
         await self._record_witnesses(
-            cur,
-            session,
-            turn,
-            location_code,
+            cur, session, turn, location_code,
             f"{player_name}이(가) {location['name']}으로 들어오는 것을 보았다.",
             source_key=f"player-move-enter:{client_action_id}",
         )
         await self._refresh_known_locations(cur, session, state)
-
         await self._insert_message(
-            cur,
-            session['id'],
-            turn['id'],
-            'narrator',
-            None,
-            'choice_result',
-            f"{location['name']}으로 이동했다.",
+            cur, session['id'], turn['id'], 'narrator', None, 'choice_result',
+            f"{location['name']}으로 한 칸 이동했다. 주행동은 아직 남아 있다.",
         )
-        return True
+        return False
 
     async def _handle_free_action(
         self,
@@ -1354,6 +1336,9 @@ class GameService:
     async def _ensure_turn_order(self, cur, session, state) -> None:
         order = _as_list(state.get('actor_order'))
         if order:
+            state.setdefault('active_conversation', None)
+            state.setdefault('movement_remaining', 0)
+            state.setdefault('player_turn_key', None)
             return
         await cur.execute(
             """
@@ -1382,6 +1367,9 @@ class GameService:
         )
         state['actions_per_round'] = 1
         state['actions_remaining'] = 1
+        state['movement_remaining'] = 1
+        state['player_turn_key'] = None
+        state['active_conversation'] = None
         state['pending_npc_question'] = None
         state['detective_bonus_done_round'] = int(state.get('detective_bonus_done_round', 0))
 
@@ -1393,14 +1381,18 @@ class GameService:
             if safety > 20:
                 raise HTTPException(status_code=500, detail='턴 진행 안전 한도를 초과했습니다.')
 
-            if _as_dict(state.get('pending_npc_question')):
+            if _as_dict(state.get('active_conversation')) or _as_dict(state.get('pending_npc_question')):
                 return
 
             order = [str(value) for value in _as_list(state.get('actor_order'))]
             index = int(state.get('actor_index', 0))
             if index >= len(order):
                 await self._advance_round(cur, session, turn, state)
-                if session.get('status') != 'active' or _as_dict(state.get('pending_npc_question')):
+                if (
+                    session.get('status') != 'active'
+                    or _as_dict(state.get('active_conversation'))
+                    or _as_dict(state.get('pending_npc_question'))
+                ):
                     return
                 continue
 
@@ -1416,14 +1408,18 @@ class GameService:
             state['current_actor_name'] = _as_dict(turn_info).get('name')
 
             if actor_id == str(session['player_character_id']):
-                state['actions_remaining'] = 1
+                turn_key = f"{session['current_turn']}:{index}"
+                if state.get('player_turn_key') != turn_key:
+                    state['player_turn_key'] = turn_key
+                    state['actions_remaining'] = 1
+                    state['movement_remaining'] = 1
                 return
 
             await self._run_single_npc_turn(cur, session, turn, state, actor_id)
+            if _as_dict(state.get('active_conversation')):
+                return
             state['actor_index'] = index + 1
             state['actions_remaining'] = 0
-            if _as_dict(state.get('pending_npc_question')):
-                return
 
     async def _run_single_npc_turn(self, cur, session, turn, state, actor_id: str) -> None:
         await cur.execute(
