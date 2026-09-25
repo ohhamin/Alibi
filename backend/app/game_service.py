@@ -273,6 +273,36 @@ class GameService:
                             session_id,
                         ),
                     )
+                    await cur.execute(
+                        """
+                        insert into game_private.agent_memories
+                          (session_id, character_id, turn_id, memory_type, content,
+                           source_key, salience, confidence, is_secret)
+                        select
+                          h.session_id,
+                          h.holder_character_id,
+                          %s,
+                          'private_evidence',
+                          '게임 시작 시 비공개로 받은 증거: ' ||
+                            c.player_title || ' - ' || c.player_text,
+                          'initial-private-evidence:' || h.clue_code,
+                          90,
+                          1.0,
+                          true
+                        from game_private.session_evidence_holdings h
+                        join game_private.story_clues c
+                          on c.story_version_id = %s
+                         and c.code = h.clue_code
+                        where h.session_id = %s
+                          and h.acquisition_type = 'initial'
+                        on conflict do nothing
+                        """,
+                        (
+                            turn_id,
+                            str(request.story_version_id),
+                            session_id,
+                        ),
+                    )
                     await self._sync_player_inventory_state(
                         cur,
                         {
