@@ -1,23 +1,29 @@
 class StoryCharacter {
   const StoryCharacter({
     required this.id,
+    required this.code,
     required this.displayName,
     required this.roleLabel,
     required this.publicBio,
+    required this.avatarUrl,
     required this.isPlayerSelectable,
   });
 
   final String id;
+  final String code;
   final String displayName;
   final String roleLabel;
   final String publicBio;
+  final String? avatarUrl;
   final bool isPlayerSelectable;
 
   factory StoryCharacter.fromJson(Map<String, dynamic> json) => StoryCharacter(
         id: json['id'] as String,
+        code: json['code'] as String? ?? '',
         displayName: json['display_name'] as String? ?? '',
         roleLabel: json['role_label'] as String? ?? '',
         publicBio: json['public_bio'] as String? ?? '',
+        avatarUrl: json['avatar_url'] as String?,
         isPlayerSelectable: json['is_player_selectable'] as bool? ?? false,
       );
 }
