@@ -139,7 +139,7 @@ class GameService:
                     state = deepcopy(_as_dict(story['initial_state']))
                     rules = _as_dict(story['turn_rules'])
                     state['round'] = 1
-                    state['actions_per_round'] = 1
+                    state['actions_per_round'] = 2
                     state['actions_remaining'] = 0
                     state['movement_remaining'] = 0
                     state['active_conversation'] = None
@@ -282,7 +282,7 @@ class GameService:
                         'system',
                         (
                             f"당신은 {player['display_name']}({player['role_label']})입니다. "
-                            "모든 인물은 위에서부터 한 번씩 행동합니다. 당신 차례에는 인접 장소 1칸 무료 이동과 주행동 1회를 할 수 있습니다."
+                            "모든 인물은 위에서부터 한 번씩 행동합니다. 당신 차례에는 주행동 2회를 할 수 있고, 각 주행동 전마다 인접 장소 1칸을 무료로 이동할 수 있습니다."
                         ),
                     )
 
@@ -351,7 +351,8 @@ class GameService:
                     await cur.execute(
                         """
                         select sc.id, sc.display_name, sc.role_label, sc.public_bio,
-                               cc.private_backstory, cc.objective, cc.secrets, cc.personality
+                               cc.private_backstory, cc.objective, cc.secrets, cc.personality,
+                               cc.relationship_seed
                         from public.story_characters sc
                         join game_private.character_configs cc on cc.character_id = sc.id
                         where sc.id = %s
@@ -508,6 +509,7 @@ class GameService:
                     'player_action_history': player_action_history,
                     'current_actor_id': state.get('current_actor_id'),
                     'current_actor_name': state.get('current_actor_name'),
+                    'detective_verdict': state.get('detective_verdict'),
                     'ending': ending,
                     'solution': solution,
                 }
@@ -679,12 +681,20 @@ class GameService:
                                     raise HTTPException(status_code=400, detail='지원하지 않는 행동입니다.')
 
                                 if consumed:
-                                    state['actions_remaining'] = 0
+                                    state['actions_remaining'] = max(
+                                        0, int(state.get('actions_remaining', 2)) - 1
+                                    )
                                     if not _as_dict(state.get('active_conversation')):
-                                        state['actor_index'] = int(state.get('actor_index', 0)) + 1
-                                        state['current_actor_id'] = None
-                                        state['current_actor_name'] = None
-                                        await self._set_actor_preview(session, state)
+                                        if int(state.get('actions_remaining', 0)) > 0:
+                                            state['movement_remaining'] = 1
+                                            state['current_actor_id'] = str(session['player_character_id'])
+                                            state['current_actor_name'] = await self._player_name(cur, session)
+                                        else:
+                                            state['movement_remaining'] = 0
+                                            state['actor_index'] = int(state.get('actor_index', 0)) + 1
+                                            state['current_actor_id'] = None
+                                            state['current_actor_name'] = None
+                                            await self._set_actor_preview(session, state)
 
                     await cur.execute(
                         """
@@ -1587,6 +1597,7 @@ class GameService:
     async def _ensure_turn_order(self, cur, session, state) -> None:
         order = _as_list(state.get('actor_order'))
         if order:
+            state['actions_per_round'] = 2
             state.setdefault('active_conversation', None)
             state.setdefault('movement_remaining', 0)
             state.setdefault('player_turn_key', None)
@@ -1616,8 +1627,8 @@ class GameService:
             (idx for idx, value in enumerate(state['actor_order']) if value == player_id),
             0,
         )
-        state['actions_per_round'] = 1
-        state['actions_remaining'] = 1
+        state['actions_per_round'] = 2
+        state['actions_remaining'] = 2
         state['movement_remaining'] = 1
         state['player_turn_key'] = None
         state['active_conversation'] = None
@@ -2554,6 +2565,12 @@ class GameService:
 
         reasoning = str(verdict.get('reasoning') or '').strip()
         accused_name = accused['display_name'] if accused else '알 수 없는 인물'
+        state['detective_verdict'] = {
+            'detective_name': detective['display_name'],
+            'accused_character_id': accused_id,
+            'accused_name': accused_name,
+            'reasoning': reasoning,
+        }
         await self._insert_message(
             cur,
             session['id'],
