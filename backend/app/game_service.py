@@ -549,74 +549,88 @@ class GameService:
                     state = deepcopy(_as_dict(session['public_state']))
                     await self._ensure_turn_order(cur, session, state)
 
-                    pending = _as_dict(state.get('pending_npc_question'))
-                    if pending:
-                        if request.action_type != 'reply':
+                    conversation = _as_dict(state.get('active_conversation'))
+                    if conversation:
+                        if request.action_type == 'reply':
+                            ended = await self._continue_conversation(
+                                cur, session, turn, state, request, client_action_id, conversation
+                            )
+                        elif request.action_type == 'conversation_present':
+                            ended = await self._present_in_conversation(
+                                cur, session, turn, state, request, client_action_id, conversation
+                            )
+                        elif request.action_type == 'end_conversation':
+                            await self._end_conversation(
+                                cur, session, turn, state, request, client_action_id, conversation
+                            )
+                            ended = True
+                        else:
                             raise HTTPException(
                                 status_code=409,
-                                detail=f"{pending.get('actor_name', '인물')}의 질문에 먼저 답해야 합니다.",
+                                detail='진행 중인 대화를 먼저 이어가거나 종료해 주세요.',
                             )
-                        await self._handle_reply(
-                            cur, session, turn, state, request, client_action_id, pending
-                        )
-                        await self._advance_turn_sequence(cur, session, turn, state)
+                        if ended:
+                            await self._finish_conversation_turn(cur, session, turn, state, conversation)
                     else:
-                        if str(state.get('current_actor_id') or '') != str(session['player_character_id']):
+                        pending = _as_dict(state.get('pending_npc_question'))
+                        if pending:
+                            if request.action_type != 'reply':
+                                raise HTTPException(
+                                    status_code=409,
+                                    detail=f"{pending.get('actor_name', '인물')}의 질문에 먼저 답해야 합니다.",
+                                )
+                            await self._handle_reply(
+                                cur, session, turn, state, request, client_action_id, pending
+                            )
                             await self._advance_turn_sequence(cur, session, turn, state)
-                        if _as_dict(state.get('pending_npc_question')):
-                            pass
-                        elif str(state.get('current_actor_id') or '') != str(session['player_character_id']):
-                            raise HTTPException(status_code=409, detail='아직 당신의 차례가 아닙니다.')
                         else:
-                            consumed = False
-                            if request.action_type == 'move':
-                                consumed = await self._handle_move(
-                                    cur, session, turn, state, request, client_action_id
-                                )
-                            elif request.action_type == 'act':
-                                consumed = await self._handle_free_action(
-                                    cur,
-                                    session,
-                                    turn,
-                                    state,
-                                    request,
-                                    client_action_id,
-                                    action_text=(request.input_text or '').strip(),
-                                )
-                            elif request.action_type in {'search', 'inspect'}:
-                                legacy_text = (
-                                    (request.input_text or '').strip()
-                                    or ('주변을 꼼꼼히 살펴본다.' if request.action_type == 'search'
-                                        else '눈에 보이는 것을 자세히 조사한다.')
-                                )
-                                consumed = await self._handle_free_action(
-                                    cur,
-                                    session,
-                                    turn,
-                                    state,
-                                    request,
-                                    client_action_id,
-                                    action_text=legacy_text,
-                                )
-                            elif request.action_type == 'ask':
-                                consumed = await self._handle_ask(
-                                    cur, session, turn, state, request, client_action_id
-                                )
-                            elif request.action_type == 'present':
-                                consumed = await self._handle_present(
-                                    cur, session, turn, state, request, client_action_id
-                                )
-                            elif request.action_type == 'reply':
-                                raise HTTPException(status_code=409, detail='현재 답변할 질문이 없습니다.')
-                            else:
-                                raise HTTPException(status_code=400, detail='지원하지 않는 행동입니다.')
-
-                            if consumed:
-                                state['actions_remaining'] = 0
-                                state['actor_index'] = int(state.get('actor_index', 0)) + 1
-                                state['current_actor_id'] = None
-                                state['current_actor_name'] = None
+                            if str(state.get('current_actor_id') or '') != str(session['player_character_id']):
                                 await self._advance_turn_sequence(cur, session, turn, state)
+                            if _as_dict(state.get('active_conversation')):
+                                pass
+                            elif str(state.get('current_actor_id') or '') != str(session['player_character_id']):
+                                raise HTTPException(status_code=409, detail='아직 당신의 차례가 아닙니다.')
+                            else:
+                                consumed = False
+                                if request.action_type == 'move':
+                                    consumed = await self._handle_move(
+                                        cur, session, turn, state, request, client_action_id
+                                    )
+                                elif request.action_type == 'act':
+                                    consumed = await self._handle_free_action(
+                                        cur, session, turn, state, request, client_action_id,
+                                        action_text=(request.input_text or '').strip(),
+                                    )
+                                elif request.action_type in {'search', 'inspect'}:
+                                    legacy_text = (
+                                        (request.input_text or '').strip()
+                                        or ('주변을 꼼꼼히 살펴본다.' if request.action_type == 'search'
+                                            else '눈에 보이는 것을 자세히 조사한다.')
+                                    )
+                                    consumed = await self._handle_free_action(
+                                        cur, session, turn, state, request, client_action_id,
+                                        action_text=legacy_text,
+                                    )
+                                elif request.action_type == 'ask':
+                                    consumed = await self._handle_ask(
+                                        cur, session, turn, state, request, client_action_id
+                                    )
+                                elif request.action_type == 'present':
+                                    consumed = await self._handle_present(
+                                        cur, session, turn, state, request, client_action_id
+                                    )
+                                elif request.action_type in {'reply', 'conversation_present', 'end_conversation'}:
+                                    raise HTTPException(status_code=409, detail='현재 진행 중인 대화가 없습니다.')
+                                else:
+                                    raise HTTPException(status_code=400, detail='지원하지 않는 행동입니다.')
+
+                                if consumed:
+                                    state['actions_remaining'] = 0
+                                    if not _as_dict(state.get('active_conversation')):
+                                        state['actor_index'] = int(state.get('actor_index', 0)) + 1
+                                        state['current_actor_id'] = None
+                                        state['current_actor_name'] = None
+                                        await self._advance_turn_sequence(cur, session, turn, state)
 
                     await cur.execute(
                         """
