@@ -1879,6 +1879,19 @@ class _EndingViewState extends State<_EndingView> {
     final solution = widget.state['solution'] as Map<String, dynamic>?;
     final verdict =
         widget.state['detective_verdict'] as Map<String, dynamic>?;
+    final rawReasoning =
+        (verdict?['reasoning'] as String? ?? '').trim();
+    const genericFallback = '확보한 정보만으로 가장 의심되는 인물을 지목한다.';
+    final clues = ((widget.state['clues'] as List?) ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final reasoningUnavailable =
+        rawReasoning.isEmpty || rawReasoning == genericFallback;
+    final clueSummary = clues
+        .take(4)
+        .map((clue) => (clue['title'] as String? ?? '').trim())
+        .where((title) => title.isNotEmpty)
+        .join(' · ');
 
     return ListView(
       padding: const EdgeInsets.all(22),
@@ -1906,11 +1919,27 @@ class _EndingViewState extends State<_EndingView> {
                   '최종 지목: ${verdict?['accused_name'] ?? '알 수 없는 인물'}',
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 16),
                 Text(
-                  verdict?['reasoning'] as String? ??
-                      '탐정의 최종 추론을 불러오지 못했습니다.',
+                  '지목 근거',
+                  style: Theme.of(context).textTheme.titleMedium,
                 ),
+                const SizedBox(height: 7),
+                if (!reasoningUnavailable)
+                  Text(rawReasoning)
+                else ...[
+                  const Text(
+                    '탐정의 상세 추론 생성에 실패했습니다. '
+                    '지목 당시 확보되어 있던 단서는 아래와 같습니다.',
+                  ),
+                  if (clueSummary.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      clueSummary,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ],
               ],
             ),
           ),
