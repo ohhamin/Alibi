@@ -66,6 +66,8 @@ class _GameScreenState extends State<GameScreen> {
       _currentActorId == _playerCharacterId;
   int get _movementRemaining =>
       (_publicState['movement_remaining'] as num?)?.toInt() ?? 0;
+  int get _actionsRemaining =>
+      (_publicState['actions_remaining'] as num?)?.toInt() ?? 0;
 
   @override
   void initState() {
@@ -274,6 +276,11 @@ class _GameScreenState extends State<GameScreen> {
     final traits = ((personality['traits'] as List?) ?? const [])
         .map((e) => '$e')
         .toList();
+    final relationshipSeed =
+        (role['relationship_seed'] as Map<String, dynamic>?) ?? const {};
+    final incidentTimeline =
+        ((relationshipSeed['incident_timeline'] as List?) ?? const [])
+            .cast<Map<String, dynamic>>();
 
     await showModalBottomSheet<void>(
       context: context,
@@ -323,12 +330,34 @@ class _GameScreenState extends State<GameScreen> {
                 ),
               const SizedBox(height: 18),
               Text(
-                '나의 행동·증언 타임라인',
+                '사건 당시 나의 행적',
                 style: Theme.of(context).textTheme.titleMedium,
               ),
               const SizedBox(height: 4),
               const Text(
-                '내가 실제로 한 행동과 대답을 시간 순서대로 확인할 수 있습니다. 거짓 증언을 할 때 이전 발언과 모순되지 않는지 참고하세요.',
+                '사건이 일어나기 전후에 내가 실제로 무엇을 했는지 정리한 기록입니다. 진술할 때 사실대로 말할지, 일부를 숨기거나 거짓말할지 판단하는 데 참고하세요.',
+              ),
+              const SizedBox(height: 8),
+              if (incidentTimeline.isEmpty)
+                const Text('정리된 사건 당시 행적이 없습니다.')
+              else
+                ...incidentTimeline.map(
+                  (item) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    leading: const Icon(Icons.schedule, size: 20),
+                    title: Text(item['text'] as String? ?? ''),
+                    subtitle: Text(item['time'] as String? ?? ''),
+                  ),
+                ),
+              const SizedBox(height: 18),
+              Text(
+                '게임 시작 후 행동·증언',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                '게임 시작 후 내가 실제로 한 행동과 대답입니다. 이전 발언과 모순되지 않는지 확인할 수 있습니다.',
               ),
               const SizedBox(height: 8),
               if (_playerActionHistory.isEmpty)
@@ -503,6 +532,35 @@ class _GameScreenState extends State<GameScreen> {
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showCurrentLocation() async {
+    final currentLocation = _publicState['current_location'] as String?;
+    final currentName =
+        _publicState['current_location_name'] as String? ?? '장소 미상';
+    final adjacentNames =
+        _adjacentCodes(currentLocation).map(_locationName).toList();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+          child: _SceneCard(
+            locationName: currentName,
+            description:
+                _currentLocationDetail?['description'] as String? ?? '',
+            people: _visibleCharacters,
+            adjacentNames: adjacentNames,
+            onMap: () {
+              Navigator.pop(context);
+              _showMap();
+            },
           ),
         ),
       ),
@@ -922,8 +980,10 @@ class _GameScreenState extends State<GameScreen> {
     final currentLocation =
         _publicState['current_location_name'] ?? '장소 미상';
     final pending = _pendingQuestion;
+    final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
 
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       appBar: AppBar(
         title: Text(_session['story_title'] as String? ?? 'ALIBI'),
         actions: [
@@ -952,27 +1012,15 @@ class _GameScreenState extends State<GameScreen> {
           _StatusBar(
             round: round,
             maxRounds: maxRounds,
+            actionsRemaining: _actionsRemaining,
+            maxActions: 2,
             location: '$currentLocation',
-            currentActor: _currentActorName,
-            isPlayerTurn: _isPlayerTurn,
-            movementRemaining: _movementRemaining,
-            conversationActive: _activeConversation != null,
+            onLocationTap: _showCurrentLocation,
           ),
           if (_busy) const LinearProgressIndicator(minHeight: 2),
-          if (!_completed)
-            _SceneCard(
-              locationName: '$currentLocation',
-              description:
-                  _currentLocationDetail?['description'] as String? ?? '',
-              people: _visibleCharacters,
-              adjacentNames: _adjacentCodes(
-                _publicState['current_location'] as String?,
-              ).map(_locationName).toList(),
-              onMap: _showMap,
-            ),
           if (pending != null && !_completed)
             Card(
-              margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
               child: ListTile(
                 leading: const Icon(Icons.chat_bubble_outline),
                 title: Text(
@@ -992,6 +1040,7 @@ class _GameScreenState extends State<GameScreen> {
                   _busy || (!_isPlayerTurn && _pendingQuestion == null),
               answeringLegacyQuestion: _pendingQuestion != null,
               canMove: _isPlayerTurn && _movementRemaining > 0,
+              keyboardOpen: keyboardOpen,
               controller: _actionController,
               focusNode: _actionFocus,
               currentActorName: _currentActorName,
@@ -1009,55 +1058,96 @@ class _StatusBar extends StatelessWidget {
   const _StatusBar({
     required this.round,
     required this.maxRounds,
+    required this.actionsRemaining,
+    required this.maxActions,
     required this.location,
-    required this.currentActor,
-    required this.isPlayerTurn,
-    required this.movementRemaining,
-    required this.conversationActive,
+    required this.onLocationTap,
   });
 
   final Object round;
   final Object maxRounds;
+  final int actionsRemaining;
+  final int maxActions;
   final String location;
-  final String currentActor;
-  final bool isPlayerTurn;
-  final int movementRemaining;
-  final bool conversationActive;
+  final VoidCallback onLocationTap;
 
   @override
   Widget build(BuildContext context) {
-    final turnText = conversationActive
-        ? '대화 중'
-        : isPlayerTurn
-            ? '내 차례'
-            : currentActor.isEmpty
-                ? '턴 진행 중'
-                : '$currentActor 차례';
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Row(
         children: [
-          Chip(label: Text('라운드 $round / $maxRounds')),
-          Chip(
-            avatar: const Icon(Icons.person_outline, size: 18),
-            label: Text(turnText),
-          ),
-          if (isPlayerTurn)
-            Chip(
-              avatar: const Icon(Icons.directions_walk, size: 18),
-              label: Text(
-                movementRemaining > 0 ? '무료 이동 1칸' : '이동 사용',
-              ),
+          Expanded(
+            flex: 10,
+            child: _StatusPill(
+              icon: Icons.timelapse,
+              label: '라운드 $round/$maxRounds',
             ),
-          Chip(
-            avatar: const Icon(Icons.place_outlined, size: 18),
-            label: Text(location),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            flex: 9,
+            child: _StatusPill(
+              icon: Icons.bolt_outlined,
+              label: '행동 $actionsRemaining/$maxActions',
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            flex: 13,
+            child: _StatusPill(
+              icon: Icons.place_outlined,
+              label: location,
+              onTap: onLocationTap,
+            ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({
+    required this.icon,
+    required this.label,
+    this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Theme.of(context).dividerColor),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 11),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 17),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
