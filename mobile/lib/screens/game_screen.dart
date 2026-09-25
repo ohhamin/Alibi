@@ -282,6 +282,8 @@ class _GameScreenState extends State<GameScreen> {
     switch (type) {
       case 'move':
         return '이동 → ${_locationName(payload['location_code'] as String?)}';
+      case 'skip':
+        return '행동 안 함';
       case 'ask':
         return '$target에게 질문: $input';
       case 'reply':
@@ -1639,6 +1641,7 @@ class _GameScreenState extends State<GameScreen> {
               onSubmit: _submitText,
               onMove: _chooseMove,
               onTalk: _startConversation,
+              onSkip: () => _act('skip'),
             ),
         ],
       ),
@@ -1999,6 +2002,7 @@ class _ActionComposer extends StatelessWidget {
     required this.onSubmit,
     required this.onMove,
     required this.onTalk,
+    required this.onSkip,
   });
 
   final bool disabled;
@@ -2011,6 +2015,7 @@ class _ActionComposer extends StatelessWidget {
   final VoidCallback onSubmit;
   final VoidCallback onMove;
   final VoidCallback onTalk;
+  final Future<void> Function() onSkip;
 
   @override
   Widget build(BuildContext context) {
@@ -2089,7 +2094,20 @@ class _ActionComposer extends StatelessWidget {
                   ),
                 ],
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 6),
+              SizedBox(
+                width: double.infinity,
+                child: TextButton.icon(
+                  onPressed: disabled
+                      ? null
+                      : () async {
+                          await onSkip();
+                        },
+                  icon: const Icon(Icons.skip_next_outlined),
+                  label: const Text('행동 안 함 (1회 소모)'),
+                ),
+              ),
+              const SizedBox(height: 2),
               Text(
                 '라운드당 행동 2회 · 각 행동 전에 인접 장소 1칸을 무료로 이동할 수 있습니다.',
                 style: Theme.of(context).textTheme.bodySmall,
