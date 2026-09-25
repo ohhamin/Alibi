@@ -1099,7 +1099,7 @@ class GameService:
 
         await cur.execute(
             """
-            select clue_code, title, content
+            select clue_code, title, content, category
             from public.session_clues
             where session_id = %s
             order by discovered_at
@@ -1107,7 +1107,30 @@ class GameService:
             (session['id'],),
         )
         discovered = list(await cur.fetchall())
-        discovered_codes = {row['clue_code'] for row in discovered}
+
+        private_held: list[dict[str, Any]] = []
+        if session['player_character_id']:
+            await cur.execute(
+                """
+                select h.clue_code,
+                       c.player_title as title,
+                       c.player_text as content,
+                       c.category
+                from game_private.session_evidence_holdings h
+                join game_private.story_clues c
+                  on c.story_version_id = %s and c.code = h.clue_code
+                where h.session_id = %s
+                  and h.holder_character_id = %s
+                  and h.status = 'held'
+                order by h.acquired_at
+                """,
+                (
+                    session['story_version_id'],
+                    session['id'],
+                    session['player_character_id'],
+                ),
+            )
+            private_held = list(await cur.fetchall())
 
         await cur.execute(
             """
@@ -1116,21 +1139,39 @@ class GameService:
               c.player_title,
               c.player_text,
               c.reveal_rule,
-              c.metadata,
-              exists (
-                select 1 from game_private.internal_events ie
-                where ie.session_id = %s
-                  and ie.event_type in ('clue_hidden', 'clue_taken')
-                  and ie.payload->>'clue_code' = c.code
-              ) as suppressed
+              c.metadata
             from game_private.story_clues c
             join game_private.story_locations l on l.id = c.location_id
             where c.story_version_id = %s
               and l.code = %s
               and coalesce((c.reveal_rule->>'min_round')::int, 1) <= %s
-            order by c.importance desc, c.created_at
+              and not exists (
+                select 1
+                from game_private.session_evidence_holdings h
+                where h.session_id = %s and h.clue_code = c.code
+              )
+              and not exists (
+                select 1
+                from public.session_clues pc
+                where pc.session_id = %s and pc.clue_code = c.code
+              )
+              and not exists (
+                select 1
+                from game_private.internal_events ie
+                where ie.session_id = %s
+                  and ie.event_type in ('clue_hidden', 'clue_taken')
+                  and ie.payload->>'clue_code' = c.code
+              )
+            order by random()
             """,
-            (session['id'], session['story_version_id'], location_code, session['current_turn']),
+            (
+                session['story_version_id'],
+                location_code,
+                session['current_turn'],
+                session['id'],
+                session['id'],
+                session['id'],
+            ),
         )
         clue_rows = list(await cur.fetchall())
         hidden_candidates: list[dict[str, Any]] = []
@@ -1149,8 +1190,8 @@ class GameService:
                 'code': clue['code'],
                 'title': clue['player_title'],
                 'interaction_terms': terms,
-                'discovered': clue['code'] in discovered_codes,
-                'suppressed': bool(clue['suppressed']),
+                'discovered': False,
+                'suppressed': False,
             }
             hidden_candidates.append(item)
             clue_map[clue['code']] = clue
@@ -1166,7 +1207,7 @@ class GameService:
             same_room_characters=same_room,
             discovered_clues=[
                 {'code': row['clue_code'], 'title': row['title']}
-                for row in discovered
+                for row in [*discovered, *private_held]
             ],
             hidden_candidates=hidden_candidates,
         )
@@ -1188,29 +1229,17 @@ class GameService:
         clue_code = str(decision.get('clue_code') or '').strip() or None
         clue = clue_map.get(clue_code) if clue_code else None
 
-        if kind in {'hide', 'alter', 'take'}:
-            if clue is None or clue_code not in discovered_codes:
-                await self._insert_message(
-                    cur,
-                    session['id'],
-                    turn['id'],
-                    'system',
-                    None,
-                    'system',
-                    '조작하거나 가져가려는 대상을 먼저 확인해야 합니다. 행동은 소모되지 않았습니다.',
-                )
-                return False
-            if bool(clue.get('suppressed')):
-                await self._insert_message(
-                    cur,
-                    session['id'],
-                    turn['id'],
-                    'system',
-                    None,
-                    'system',
-                    '그 대상은 현재 이 장소에서 다시 조작할 수 없습니다. 행동은 소모되지 않았습니다.',
-                )
-                return False
+        if kind in {'hide', 'alter'}:
+            await self._insert_message(
+                cur,
+                session['id'],
+                turn['id'],
+                'system',
+                None,
+                'system',
+                '증거는 직접 훼손하거나 현장에 숨길 수 없습니다. 발견한 증거는 비공개로 소지하고, 라운드 종료 때 무엇을 제출할지 선택하세요.',
+            )
+            return False
 
         await self._insert_action(
             cur,
@@ -1236,50 +1265,46 @@ class GameService:
         )
 
         result_text = '행동을 시도했지만 새롭게 확인되는 사실은 없었다.'
-        if clue is not None and kind in {'interact', 'inspect', 'use'} and clue_code not in discovered_codes:
+        if (
+            clue is not None
+            and kind in {'interact', 'inspect', 'use', 'take'}
+            and session['player_character_id']
+        ):
             await cur.execute(
                 """
-                insert into public.session_clues
-                  (session_id, clue_code, title, content, category, discovered_turn)
-                select %s, c.code, c.player_title, c.player_text, c.category, %s
-                from game_private.story_clues c
-                where c.story_version_id = %s and c.code = %s
+                insert into game_private.session_evidence_holdings
+                  (session_id, clue_code, holder_character_id, acquired_round, acquisition_type, status)
+                values (%s, %s, %s, %s, 'search', 'held')
                 on conflict (session_id, clue_code) do nothing
+                returning clue_code
                 """,
-                (session['id'], session['current_turn'], session['story_version_id'], clue_code),
+                (
+                    session['id'],
+                    clue_code,
+                    session['player_character_id'],
+                    session['current_turn'],
+                ),
             )
-            result_text = f"{clue['player_title']}을(를) 확인했다. {clue['player_text']}"
-        elif clue is not None and kind == 'take':
-            inventory = _as_list(state.get('inventory_clues'))
-            if clue_code not in inventory:
-                inventory.append(clue_code)
-            state['inventory_clues'] = inventory
-            await self._insert_internal_event(
-                cur,
-                session,
-                'clue_taken',
-                actor_character_id=session['player_character_id'],
-                payload={'clue_code': clue_code, 'location_code': location_code, 'action_text': action_text},
-            )
-            result_text = f"{clue['player_title']}을(를) 챙겼다. 이 장소에서는 더 이상 그대로 남아 있지 않는다."
-        elif clue is not None and kind == 'hide':
-            await self._insert_internal_event(
-                cur,
-                session,
-                'clue_hidden',
-                actor_character_id=session['player_character_id'],
-                payload={'clue_code': clue_code, 'location_code': location_code, 'action_text': action_text},
-            )
-            result_text = f"{clue['player_title']}을(를) 눈에 띄지 않게 숨겼다."
-        elif clue is not None and kind == 'alter':
-            await self._insert_internal_event(
-                cur,
-                session,
-                'clue_altered',
-                actor_character_id=session['player_character_id'],
-                payload={'clue_code': clue_code, 'location_code': location_code, 'action_text': action_text},
-            )
-            result_text = f"{clue['player_title']}에 손을 대어 상태를 바꿨다. 조작 흔적이 남을 수도 있다."
+            acquired = await cur.fetchone()
+            if acquired:
+                await self._sync_player_inventory_state(cur, session, state)
+                await self._insert_internal_event(
+                    cur,
+                    session,
+                    'clue_acquired',
+                    actor_character_id=session['player_character_id'],
+                    payload={
+                        'clue_code': clue_code,
+                        'location_code': location_code,
+                        'action_text': action_text,
+                    },
+                )
+                result_text = (
+                    f"{clue['player_title']}을(를) 찾아 비공개로 소지했다. "
+                    f"{clue['player_text']} 이 증거는 이제 다른 인물이 다시 찾을 수 없다."
+                )
+            else:
+                result_text = '이미 다른 인물이 확보한 증거라서 이곳에서는 더 이상 찾을 수 없었다.'
         elif kind == 'stage':
             await self._insert_internal_event(
                 cur,
