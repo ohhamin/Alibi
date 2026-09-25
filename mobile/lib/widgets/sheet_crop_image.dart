@@ -3,9 +3,6 @@ import 'package:flutter/material.dart';
 /// Displays a normalized crop from a real raster asset without redrawing it.
 ///
 /// [crop] is expressed in 0..1 coordinates against the original sheet.
-/// The crop keeps the source aspect ratio, then [fit] controls how it fills
-/// the destination. This lets ALIBI use the generated high-resolution artwork
-/// directly while keeping only a few bundled files.
 class SheetCropImage extends StatelessWidget {
   const SheetCropImage({
     super.key,
@@ -14,6 +11,8 @@ class SheetCropImage extends StatelessWidget {
     this.fit = BoxFit.cover,
     this.filterQuality = FilterQuality.high,
     this.borderRadius,
+    this.sheetWidth = 1200,
+    this.sheetHeight = 900,
   });
 
   final String asset;
@@ -21,6 +20,8 @@ class SheetCropImage extends StatelessWidget {
   final BoxFit fit;
   final FilterQuality filterQuality;
   final BorderRadius? borderRadius;
+  final double sheetWidth;
+  final double sheetHeight;
 
   @override
   Widget build(BuildContext context) {
@@ -33,9 +34,6 @@ class SheetCropImage extends StatelessWidget {
             ? constraints.maxHeight
             : 300.0;
 
-        // All generated sprite sheets are 4:3.
-        const sheetWidth = 1200.0;
-        const sheetHeight = 900.0;
         final cropWidth = crop.width * sheetWidth;
         final cropHeight = crop.height * sheetHeight;
 
