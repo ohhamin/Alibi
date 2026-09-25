@@ -22,5 +22,6 @@ flutter:
   assets:
     - assets/images/locations/
     - assets/images/characters/
+    - assets/images/evidence/
     - assets/images/ui/
     - assets/images/sheets/
