@@ -18,6 +18,8 @@ class _GameScreenState extends State<GameScreen> {
 
   late Map<String, dynamic> _state;
   bool _busy = false;
+  bool _autoAdvanceScheduled = false;
+  bool _conversationSheetOpen = false;
 
   Map<String, dynamic> get _session =>
       (_state['session'] as Map<String, dynamic>?) ?? const {};
@@ -35,6 +37,12 @@ class _GameScreenState extends State<GameScreen> {
   List<Map<String, dynamic>> get _characterLocations =>
       ((_state['character_locations'] as List?) ?? const [])
           .cast<Map<String, dynamic>>();
+  List<Map<String, dynamic>> get _inventoryItems =>
+      ((_state['inventory_items'] as List?) ?? const [])
+          .cast<Map<String, dynamic>>();
+  List<Map<String, dynamic>> get _playerActionHistory =>
+      ((_state['player_action_history'] as List?) ?? const [])
+          .cast<Map<String, dynamic>>();
 
   Map<String, dynamic>? get _playerRole =>
       _state['player_role'] as Map<String, dynamic>?;
@@ -42,22 +50,28 @@ class _GameScreenState extends State<GameScreen> {
       _state['current_location_detail'] as Map<String, dynamic>?;
   Map<String, dynamic>? get _pendingQuestion =>
       _state['pending_npc_question'] as Map<String, dynamic>?;
+  Map<String, dynamic>? get _activeConversation =>
+      _state['active_conversation'] as Map<String, dynamic>?;
 
   String get _sessionId => _session['id'] as String;
   String? get _playerCharacterId => _session['player_character_id'] as String?;
-  bool get _completed => _session['status'] == 'completed';
   String? get _currentActorId => _state['current_actor_id'] as String?;
   String get _currentActorName =>
       _state['current_actor_name'] as String? ?? '';
+  bool get _completed => _session['status'] == 'completed';
   bool get _isPlayerTurn =>
       !_completed &&
+      _activeConversation == null &&
       _pendingQuestion == null &&
       _currentActorId == _playerCharacterId;
+  int get _movementRemaining =>
+      (_publicState['movement_remaining'] as num?)?.toInt() ?? 0;
 
   @override
   void initState() {
     super.initState();
     _state = widget.initialState;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _afterStateChanged());
   }
 
   @override
@@ -82,7 +96,45 @@ class _GameScreenState extends State<GameScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() => _busy = false);
+        _afterStateChanged();
+      }
+    }
+  }
+
+  void _afterStateChanged() {
+    if (!mounted || _busy || _completed) return;
+
+    if (_activeConversation != null && !_conversationSheetOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            _activeConversation != null &&
+            !_conversationSheetOpen) {
+          _openConversationSheet();
+        }
+      });
+      return;
+    }
+
+    if (_pendingQuestion != null) return;
+
+    if (_currentActorId != _playerCharacterId && !_autoAdvanceScheduled) {
+      _autoAdvanceScheduled = true;
+      Future<void>.delayed(const Duration(milliseconds: 140), () async {
+        _autoAdvanceScheduled = false;
+        if (!mounted ||
+            _busy ||
+            _completed ||
+            _activeConversation != null ||
+            _pendingQuestion != null ||
+            _currentActorId == _playerCharacterId) {
+          return;
+        }
+        await _run(
+          () => _api.post('/sessions/$_sessionId/advance'),
+        );
+      });
     }
   }
 
@@ -112,8 +164,14 @@ class _GameScreenState extends State<GameScreen> {
     final text = _actionController.text.trim();
     if (text.isEmpty || _busy) return;
 
-    final pending = _pendingQuestion;
-    if (pending == null && !_isPlayerTurn) {
+    if (_pendingQuestion != null) {
+      _actionFocus.unfocus();
+      await _act('reply', inputText: text);
+      if (mounted) _actionController.clear();
+      return;
+    }
+
+    if (!_isPlayerTurn) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -127,20 +185,90 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     _actionFocus.unfocus();
-    await _act(
-      pending != null ? 'reply' : 'act',
-      inputText: text,
-    );
-    if (mounted) {
-      _actionController.clear();
-      _actionFocus.requestFocus();
+    await _act('act', inputText: text);
+    if (mounted) _actionController.clear();
+  }
+
+  String _locationName(String? code) {
+    if (code == null) return '위치 미상';
+    for (final location in _locations) {
+      if (location['location_code'] == code) {
+        return location['name'] as String? ?? code;
+      }
     }
+    return code;
+  }
+
+  String _clueTitle(String? code) {
+    if (code == null) return '물건';
+    for (final item in _inventoryItems) {
+      if (item['clue_code'] == code) {
+        return item['title'] as String? ?? code;
+      }
+    }
+    for (final item in _clues) {
+      if (item['clue_code'] == code) {
+        return item['title'] as String? ?? code;
+      }
+    }
+    return code;
+  }
+
+  List<String> _adjacentCodes(String? locationCode) {
+    if (locationCode == null) return const [];
+    for (final location in _locations) {
+      if (location['location_code'] == locationCode) {
+        return ((location['adjacent'] as List?) ?? const [])
+            .map((e) => '$e')
+            .toList();
+      }
+    }
+    return const [];
+  }
+
+  String _historyDescription(Map<String, dynamic> item) {
+    final type = item['action_type'] as String? ?? '';
+    final input = item['input_text'] as String? ?? '';
+    final target = item['target_name'] as String? ?? '';
+    final payload =
+        (item['payload'] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+
+    switch (type) {
+      case 'move':
+        return '이동 → ${_locationName(payload['location_code'] as String?)}';
+      case 'ask':
+        return '$target에게 질문: $input';
+      case 'reply':
+        return '대답: $input';
+      case 'conversation_present':
+        return '대화 중 물건 제시: ${_clueTitle(payload['clue_code'] as String?)}';
+      case 'present':
+        return '$target에게 물건 제시: ${_clueTitle(payload['clue_code'] as String?)}';
+      case 'end_conversation':
+        return '대화 종료';
+      case 'act':
+      case 'search':
+      case 'inspect':
+        return input.isEmpty ? '현장 행동' : input;
+      default:
+        return input.isEmpty ? type : input;
+    }
+  }
+
+  String _historyTime(Map<String, dynamic> item) {
+    final turn = item['turn_no'] ?? '?';
+    final raw = item['created_at'] as String?;
+    if (raw == null) return '라운드 $turn';
+    final parsed = DateTime.tryParse(raw)?.toLocal();
+    if (parsed == null) return '라운드 $turn';
+    final hh = parsed.hour.toString().padLeft(2, '0');
+    final mm = parsed.minute.toString().padLeft(2, '0');
+    return '라운드 $turn · $hh:$mm';
   }
 
   Future<void> _showRole() async {
     final role = _playerRole;
     if (role == null) return;
-
     final personality =
         (role['personality'] as Map<String, dynamic>?) ?? const {};
     final traits = ((personality['traits'] as List?) ?? const [])
@@ -151,55 +279,70 @@ class _GameScreenState extends State<GameScreen> {
       context: context,
       isScrollControlled: true,
       builder: (context) => SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(22, 22, 22, 32),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * .82,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
             children: [
               Text(
                 '${role['display_name']} · ${role['role_label'] ?? ''}',
                 style: Theme.of(context).textTheme.headlineSmall,
               ),
-              const SizedBox(height: 18),
+              const SizedBox(height: 16),
               _InfoBlock(
                 title: '공개 정보',
                 body: role['public_bio'] as String? ?? '',
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 10),
               _InfoBlock(
-                title: '당신의 배경',
+                title: '나의 배경',
                 body: role['private_backstory'] as String? ?? '없음',
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 10),
               _InfoBlock(
                 title: '목표',
                 body: role['objective'] as String? ?? '없음',
               ),
               if (traits.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                _InfoBlock(
-                  title: '기본 성격',
-                  body: traits.join(' · '),
-                ),
+                const SizedBox(height: 10),
+                _InfoBlock(title: '기본 성격', body: traits.join(' · ')),
               ],
-              const SizedBox(height: 14),
-              Text(
-                '숨기고 싶은 비밀',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
+              const SizedBox(height: 18),
+              Text('소지품', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),
-              ...(((role['secrets'] as List?) ?? const []).map(
-                (secret) => Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('•  '),
-                      Expanded(child: Text('$secret')),
-                    ],
+              if (_inventoryItems.isEmpty)
+                const Text('현재 가지고 있는 사건 물건이 없습니다.')
+              else
+                ..._inventoryItems.map(
+                  (item) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.inventory_2_outlined),
+                    title: Text(item['title'] as String? ?? ''),
+                    subtitle: Text(item['content'] as String? ?? ''),
                   ),
                 ),
-              )),
+              const SizedBox(height: 18),
+              Text(
+                '나의 행동·증언 타임라인',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                '내가 실제로 한 행동과 대답을 시간 순서대로 확인할 수 있습니다. 거짓 증언을 할 때 이전 발언과 모순되지 않는지 참고하세요.',
+              ),
+              const SizedBox(height: 8),
+              if (_playerActionHistory.isEmpty)
+                const Text('아직 기록된 행동이 없습니다.')
+              else
+                ..._playerActionHistory.map(
+                  (item) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    leading: const Icon(Icons.history, size: 20),
+                    title: Text(_historyDescription(item)),
+                    subtitle: Text(_historyTime(item)),
+                  ),
+                ),
             ],
           ),
         ),
@@ -240,40 +383,17 @@ class _GameScreenState extends State<GameScreen> {
                             const SizedBox(height: 10),
                         itemBuilder: (context, index) {
                           final clue = _clues[index];
+                          final holding = _inventoryItems.any(
+                            (item) =>
+                                item['clue_code'] == clue['clue_code'],
+                          );
                           return Card(
-                            child: Padding(
-                              padding: const EdgeInsets.all(16),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    clue['title'] as String? ?? '',
-                                    style:
-                                        Theme.of(context).textTheme.titleMedium,
-                                  ),
-                                  const SizedBox(height: 6),
-                                  Text(clue['content'] as String? ?? ''),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    '라운드 ${clue['discovered_turn'] ?? '?'} · ${clue['category'] ?? '기타'}',
-                                    style:
-                                        Theme.of(context).textTheme.bodySmall,
-                                  ),
-                                  if (_isPlayerTurn) ...[
-                                    const SizedBox(height: 10),
-                                    OutlinedButton.icon(
-                                      onPressed: _visibleCharacters.isEmpty
-                                          ? null
-                                          : () {
-                                              Navigator.pop(context);
-                                              _presentClue(clue);
-                                            },
-                                      icon: const Icon(Icons.record_voice_over),
-                                      label: const Text('같은 장소 인물에게 제시'),
-                                    ),
-                                  ],
-                                ],
-                              ),
+                            child: ListTile(
+                              title: Text(clue['title'] as String? ?? ''),
+                              subtitle: Text(clue['content'] as String? ?? ''),
+                              trailing: holding
+                                  ? const Chip(label: Text('소지 중'))
+                                  : null,
                             ),
                           );
                         },
@@ -284,70 +404,6 @@ class _GameScreenState extends State<GameScreen> {
         ),
       ),
     );
-  }
-
-  Future<void> _presentClue(Map<String, dynamic> clue) async {
-    if (!_isPlayerTurn) return;
-    final targets = _visibleCharacters;
-    if (targets.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('현재 같은 장소에 대화할 인물이 없습니다.')),
-      );
-      return;
-    }
-
-    final target = await showModalBottomSheet<Map<String, dynamic>>(
-      context: context,
-      builder: (context) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          children: [
-            ListTile(
-              title: Text("'${clue['title']}'을 누구에게 제시할까?"),
-              subtitle: const Text('같은 장소에 있는 인물에게만 제시할 수 있습니다.'),
-            ),
-            ...targets.map(
-              (character) => ListTile(
-                leading: const Icon(Icons.person_outline),
-                title: Text(character['display_name'] as String? ?? ''),
-                subtitle: Text(character['role_label'] as String? ?? ''),
-                onTap: () => Navigator.pop(context, character),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (target == null) return;
-
-    await _act(
-      'present',
-      targetCharacterId: target['id'] as String,
-      payload: {'clue_code': clue['clue_code']},
-    );
-  }
-
-  String _locationName(String? code) {
-    if (code == null) return '위치 미상';
-    for (final location in _locations) {
-      if (location['location_code'] == code) {
-        return location['name'] as String? ?? code;
-      }
-    }
-    return code;
-  }
-
-  List<String> _adjacentCodes(String? locationCode) {
-    if (locationCode == null) return const [];
-    for (final location in _locations) {
-      if (location['location_code'] == locationCode) {
-        return ((location['adjacent'] as List?) ?? const [])
-            .map((e) => '$e')
-            .toList();
-      }
-    }
-    return const [];
   }
 
   Future<void> _showMap() async {
@@ -381,7 +437,7 @@ class _GameScreenState extends State<GameScreen> {
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
-                    '화살표로 연결된 장소끼리만 한 번에 이동할 수 있습니다. 인물 위치는 현재 위치입니다.',
+                    '연결된 장소끼리 한 칸 이동할 수 있습니다. 인물 위치는 현재 위치를 그대로 보여줍니다.',
                   ),
                 ),
               ),
@@ -389,63 +445,61 @@ class _GameScreenState extends State<GameScreen> {
               Expanded(
                 child: ListView(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-                  children: [
-                    ..._locations.map((location) {
-                      final code =
-                          location['location_code'] as String? ?? '';
-                      final adjacent = ((location['adjacent'] as List?) ?? const [])
-                          .map((e) => _locationName('$e'))
-                          .toList();
-                      final people = _characterLocations
-                          .where((c) => c['location_code'] == code)
-                          .map((c) => c['display_name'] as String? ?? '인물')
-                          .toList();
-                      final isCurrent =
-                          _publicState['current_location'] == code;
-                      return Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(14),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Icon(
-                                    isCurrent
-                                        ? Icons.my_location
-                                        : Icons.location_on_outlined,
+                  children: _locations.map((location) {
+                    final code =
+                        location['location_code'] as String? ?? '';
+                    final adjacent =
+                        ((location['adjacent'] as List?) ?? const [])
+                            .map((e) => _locationName('$e'))
+                            .toList();
+                    final people = _characterLocations
+                        .where((c) => c['location_code'] == code)
+                        .map((c) => c['display_name'] as String? ?? '인물')
+                        .toList();
+                    final isCurrent =
+                        _publicState['current_location'] == code;
+                    return Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(
+                                  isCurrent
+                                      ? Icons.my_location
+                                      : Icons.location_on_outlined,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    location['name'] as String? ?? code,
+                                    style:
+                                        Theme.of(context).textTheme.titleMedium,
                                   ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(
-                                      location['name'] as String? ?? code,
-                                      style: Theme.of(context)
-                                          .textTheme
-                                          .titleMedium,
-                                    ),
-                                  ),
-                                  if (isCurrent)
-                                    const Chip(label: Text('내 위치')),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                adjacent.isEmpty
-                                    ? '연결된 장소 없음'
-                                    : '이동 경로 → ${adjacent.join(' / ')}',
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                people.isEmpty
-                                    ? '현재 인물: 없음'
-                                    : '현재 인물: ${people.join(', ')}',
-                              ),
-                            ],
-                          ),
+                                ),
+                                if (isCurrent)
+                                  const Chip(label: Text('내 위치')),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              adjacent.isEmpty
+                                  ? '연결된 장소 없음'
+                                  : '이동 경로 → ${adjacent.join(' / ')}',
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              people.isEmpty
+                                  ? '현재 인물: 없음'
+                                  : '현재 인물: ${people.join(', ')}',
+                            ),
+                          ],
                         ),
-                      );
-                    }),
-                  ],
+                      ),
+                    );
+                  }).toList(),
                 ),
               ),
             ],
@@ -456,7 +510,12 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   Future<void> _chooseMove() async {
-    if (!_isPlayerTurn) return;
+    if (!_isPlayerTurn || _movementRemaining <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('이번 차례의 무료 이동을 사용할 수 없습니다.')),
+      );
+      return;
+    }
 
     final current = _publicState['current_location'] as String?;
     final adjacent = _adjacentCodes(current);
@@ -466,7 +525,7 @@ class _GameScreenState extends State<GameScreen> {
 
     if (candidates.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('현재 위치에서 바로 이동할 수 있는 장소가 없습니다.')),
+        const SnackBar(content: Text('현재 위치에서 바로 이동할 장소가 없습니다.')),
       );
       return;
     }
@@ -479,8 +538,10 @@ class _GameScreenState extends State<GameScreen> {
           padding: const EdgeInsets.symmetric(vertical: 12),
           children: [
             ListTile(
-              title: Text('${_locationName(current)}에서 이동'),
-              subtitle: const Text('연결된 장소만 표시됩니다. 이동하면 이번 차례가 끝납니다.'),
+              title: Text('${_locationName(current)}에서 무료 이동'),
+              subtitle: const Text(
+                '이번 차례에 인접 장소 한 칸만 이동할 수 있습니다. 이동 후에도 주행동 1회가 남습니다.',
+              ),
             ),
             ...candidates.map(
               (location) => ListTile(
@@ -502,9 +563,8 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
-  Future<void> _askCharacter() async {
+  Future<void> _startConversation() async {
     if (!_isPlayerTurn) return;
-
     final targets = _visibleCharacters;
     if (targets.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -531,9 +591,14 @@ class _GameScreenState extends State<GameScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text('대화', style: Theme.of(context).textTheme.titleLarge),
+                Text(
+                  '대화 시작',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
                 const SizedBox(height: 4),
-                const Text('같은 장소에 있는 인물에게만 말을 걸 수 있습니다.'),
+                const Text(
+                  '대화 시작만 주행동 1회로 계산됩니다. 이후 최대 3번의 왕복 답변과 물건 제시는 추가 행동을 쓰지 않습니다.',
+                ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
                   initialValue: selected['id'] as String?,
@@ -565,25 +630,25 @@ class _GameScreenState extends State<GameScreen> {
                   minLines: 2,
                   maxLines: 5,
                   decoration: const InputDecoration(
-                    hintText: '예: 사건 직전 어디에 있었어요?',
+                    hintText: '첫 질문이나 말을 입력하세요.',
                     border: OutlineInputBorder(),
                   ),
                 ),
                 const SizedBox(height: 14),
                 FilledButton.icon(
                   onPressed: () {
-                    final question = controller.text.trim();
-                    if (question.isEmpty) return;
+                    final text = controller.text.trim();
+                    if (text.isEmpty) return;
                     Navigator.pop(
                       context,
                       {
                         'character_id': selected['id'] as String,
-                        'question': question,
+                        'text': text,
                       },
                     );
                   },
-                  icon: const Icon(Icons.send),
-                  label: const Text('질문하기'),
+                  icon: const Icon(Icons.forum_outlined),
+                  label: const Text('대화 시작 · 주행동 1회'),
                 ),
               ],
             ),
@@ -597,8 +662,256 @@ class _GameScreenState extends State<GameScreen> {
     await _act(
       'ask',
       targetCharacterId: result['character_id'],
-      inputText: result['question'],
+      inputText: result['text'],
     );
+  }
+
+  Future<Map<String, dynamic>?> _pickInventoryItem(
+    BuildContext sheetContext,
+  ) async {
+    if (_inventoryItems.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('현재 제시할 소지품이 없습니다.')),
+      );
+      return null;
+    }
+    return showDialog<Map<String, dynamic>>(
+      context: sheetContext,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('소지품 제시'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView(
+            shrinkWrap: true,
+            children: _inventoryItems
+                .map(
+                  (item) => ListTile(
+                    leading: const Icon(Icons.inventory_2_outlined),
+                    title: Text(item['title'] as String? ?? ''),
+                    subtitle: Text(item['content'] as String? ?? ''),
+                    onTap: () => Navigator.pop(dialogContext, item),
+                  ),
+                )
+                .toList(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openConversationSheet() async {
+    if (_conversationSheetOpen || _activeConversation == null || !mounted) {
+      return;
+    }
+    _conversationSheetOpen = true;
+    final replyController = TextEditingController();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, setSheetState) {
+          final conversation = _activeConversation;
+          if (conversation == null) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (sheetContext.mounted) Navigator.pop(sheetContext);
+            });
+            return const SizedBox.shrink();
+          }
+
+          final history =
+              ((conversation['history'] as List?) ?? const [])
+                  .cast<Map<String, dynamic>>();
+          final exchange =
+              (conversation['exchange_count'] as num?)?.toInt() ?? 0;
+          final maxExchange =
+              (conversation['max_exchanges'] as num?)?.toInt() ?? 3;
+          final actorName =
+              conversation['actor_name'] as String? ?? '인물';
+
+          Future<void> refreshAfter(Future<void> task) async {
+            await task;
+            if (!sheetContext.mounted) return;
+            if (_activeConversation == null) {
+              Navigator.pop(sheetContext);
+            } else {
+              setSheetState(() {});
+            }
+          }
+
+          return SafeArea(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                16,
+                14,
+                16,
+                MediaQuery.viewInsetsOf(sheetContext).bottom + 14,
+              ),
+              child: SizedBox(
+                height: MediaQuery.sizeOf(sheetContext).height * .68,
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.forum_outlined),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '$actorName과의 대화',
+                            style: Theme.of(sheetContext)
+                                .textTheme
+                                .titleLarge,
+                          ),
+                        ),
+                        Chip(label: Text('왕복 $exchange / $maxExchange')),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        '이 대화의 후속 답변과 소지품 제시는 추가 행동을 소모하지 않습니다. 같은 방의 인물은 내용을 모두 듣습니다.',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: ListView.builder(
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        itemCount: history.length,
+                        itemBuilder: (context, index) {
+                          final item = history[index];
+                          final speaker = item['speaker'] as String? ?? '';
+                          final text = item['text'] as String? ?? '';
+                          final isMe = speaker == 'player';
+                          return Align(
+                            alignment: isMe
+                                ? Alignment.centerRight
+                                : Alignment.centerLeft,
+                            child: Container(
+                              constraints:
+                                  const BoxConstraints(maxWidth: 310),
+                              margin:
+                                  const EdgeInsets.symmetric(vertical: 4),
+                              padding: const EdgeInsets.all(11),
+                              decoration: BoxDecoration(
+                                color: isMe
+                                    ? Theme.of(context)
+                                        .colorScheme
+                                        .primaryContainer
+                                    : Theme.of(context)
+                                        .colorScheme
+                                        .surfaceContainerHighest,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: isMe
+                                    ? CrossAxisAlignment.end
+                                    : CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    isMe ? '나' : speaker,
+                                    style:
+                                        Theme.of(context).textTheme.labelSmall,
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(text),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    TextField(
+                      controller: replyController,
+                      minLines: 1,
+                      maxLines: 3,
+                      enabled: !_busy,
+                      textInputAction: TextInputAction.send,
+                      onSubmitted: (_) async {
+                        final text = replyController.text.trim();
+                        if (text.isEmpty || _busy) return;
+                        replyController.clear();
+                        await refreshAfter(
+                          _act('reply', inputText: text),
+                        );
+                      },
+                      decoration: InputDecoration(
+                        hintText: '답변 또는 질문...',
+                        border: const OutlineInputBorder(),
+                        suffixIcon: IconButton(
+                          onPressed: _busy
+                              ? null
+                              : () async {
+                                  final text =
+                                      replyController.text.trim();
+                                  if (text.isEmpty) return;
+                                  replyController.clear();
+                                  await refreshAfter(
+                                    _act('reply', inputText: text),
+                                  );
+                                },
+                          icon: const Icon(Icons.send),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _busy
+                                ? null
+                                : () async {
+                                    final item = await _pickInventoryItem(
+                                      sheetContext,
+                                    );
+                                    if (item == null) return;
+                                    await refreshAfter(
+                                      _act(
+                                        'conversation_present',
+                                        payload: {
+                                          'clue_code':
+                                              item['clue_code'],
+                                        },
+                                      ),
+                                    );
+                                  },
+                            icon: const Icon(Icons.inventory_2_outlined),
+                            label: const Text('소지품 제시'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextButton.icon(
+                            onPressed: _busy
+                                ? null
+                                : () async {
+                                    await refreshAfter(
+                                      _act('end_conversation'),
+                                    );
+                                  },
+                            icon: const Icon(Icons.call_end),
+                            label: const Text('대화 그만하기'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+
+    replyController.dispose();
+    _conversationSheetOpen = false;
+    _afterStateChanged();
   }
 
   @override
@@ -620,7 +933,7 @@ class _GameScreenState extends State<GameScreen> {
             icon: const Icon(Icons.map_outlined),
           ),
           IconButton(
-            tooltip: '내 역할',
+            tooltip: '내 정보',
             onPressed: _showRole,
             icon: const Icon(Icons.badge_outlined),
           ),
@@ -642,7 +955,8 @@ class _GameScreenState extends State<GameScreen> {
             location: '$currentLocation',
             currentActor: _currentActorName,
             isPlayerTurn: _isPlayerTurn,
-            hasPendingQuestion: pending != null,
+            movementRemaining: _movementRemaining,
+            conversationActive: _activeConversation != null,
           ),
           if (_busy) const LinearProgressIndicator(minHeight: 2),
           if (!_completed)
@@ -657,26 +971,33 @@ class _GameScreenState extends State<GameScreen> {
               onMap: _showMap,
             ),
           if (pending != null && !_completed)
-            _IncomingQuestionCard(
-              actorName: pending['actor_name'] as String? ?? '인물',
-              question: pending['question'] as String? ?? '',
-              isDetectiveBonus: pending['source'] == 'detective_bonus',
+            Card(
+              margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: ListTile(
+                leading: const Icon(Icons.chat_bubble_outline),
+                title: Text(
+                  '${pending['actor_name'] ?? '인물'}의 질문',
+                ),
+                subtitle: Text(pending['question'] as String? ?? ''),
+              ),
             ),
           Expanded(
             child: _completed
                 ? _EndingView(state: _state)
                 : _MessageTimeline(messages: _messages),
           ),
-          if (!_completed)
+          if (!_completed && _activeConversation == null)
             _ActionComposer(
-              disabled: _busy || (!_isPlayerTurn && pending == null),
-              answering: pending != null,
+              disabled:
+                  _busy || (!_isPlayerTurn && _pendingQuestion == null),
+              answeringLegacyQuestion: _pendingQuestion != null,
+              canMove: _isPlayerTurn && _movementRemaining > 0,
               controller: _actionController,
               focusNode: _actionFocus,
               currentActorName: _currentActorName,
               onSubmit: _submitText,
               onMove: _chooseMove,
-              onTalk: _askCharacter,
+              onTalk: _startConversation,
             ),
         ],
       ),
@@ -691,7 +1012,8 @@ class _StatusBar extends StatelessWidget {
     required this.location,
     required this.currentActor,
     required this.isPlayerTurn,
-    required this.hasPendingQuestion,
+    required this.movementRemaining,
+    required this.conversationActive,
   });
 
   final Object round;
@@ -699,12 +1021,13 @@ class _StatusBar extends StatelessWidget {
   final String location;
   final String currentActor;
   final bool isPlayerTurn;
-  final bool hasPendingQuestion;
+  final int movementRemaining;
+  final bool conversationActive;
 
   @override
   Widget build(BuildContext context) {
-    final turnText = hasPendingQuestion
-        ? '답변 대기'
+    final turnText = conversationActive
+        ? '대화 중'
         : isPlayerTurn
             ? '내 차례'
             : currentActor.isEmpty
@@ -720,12 +1043,16 @@ class _StatusBar extends StatelessWidget {
         children: [
           Chip(label: Text('라운드 $round / $maxRounds')),
           Chip(
-            avatar: Icon(
-              isPlayerTurn ? Icons.person : Icons.hourglass_bottom,
-              size: 18,
-            ),
+            avatar: const Icon(Icons.person_outline, size: 18),
             label: Text(turnText),
           ),
+          if (isPlayerTurn)
+            Chip(
+              avatar: const Icon(Icons.directions_walk, size: 18),
+              label: Text(
+                movementRemaining > 0 ? '무료 이동 1칸' : '이동 사용',
+              ),
+            ),
           Chip(
             avatar: const Icon(Icons.place_outlined, size: 18),
             label: Text(location),
@@ -781,7 +1108,7 @@ class _SceneCard extends StatelessWidget {
               const SizedBox(height: 6),
               Text(description),
             ],
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
             Text(
               adjacentNames.isEmpty
                   ? '이동 경로: 없음'
@@ -811,34 +1138,6 @@ class _SceneCard extends StatelessWidget {
               ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _IncomingQuestionCard extends StatelessWidget {
-  const _IncomingQuestionCard({
-    required this.actorName,
-    required this.question,
-    required this.isDetectiveBonus,
-  });
-
-  final String actorName;
-  final String question;
-  final bool isDetectiveBonus;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-      child: ListTile(
-        leading: Icon(
-          isDetectiveBonus ? Icons.manage_search : Icons.chat_bubble_outline,
-        ),
-        title: Text(
-          isDetectiveBonus ? '탐정의 공개 추가 질문' : '$actorName의 질문',
-        ),
-        subtitle: Text(question),
       ),
     );
   }
@@ -919,7 +1218,8 @@ class _MessageTimeline extends StatelessWidget {
 class _ActionComposer extends StatelessWidget {
   const _ActionComposer({
     required this.disabled,
-    required this.answering,
+    required this.answeringLegacyQuestion,
+    required this.canMove,
     required this.controller,
     required this.focusNode,
     required this.currentActorName,
@@ -929,7 +1229,8 @@ class _ActionComposer extends StatelessWidget {
   });
 
   final bool disabled;
-  final bool answering;
+  final bool answeringLegacyQuestion;
+  final bool canMove;
   final TextEditingController controller;
   final FocusNode focusNode;
   final String currentActorName;
@@ -939,11 +1240,11 @@ class _ActionComposer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hint = answering
+    final hint = answeringLegacyQuestion
         ? '질문에 답변하세요...'
         : disabled
             ? '${currentActorName.isEmpty ? '다른 인물' : currentActorName}의 차례입니다.'
-            : '무엇을 할까? 예: 직원용 서랍을 열어본다';
+            : '주행동을 입력하세요. 예: 직원용 서랍을 조사한다';
 
     return SafeArea(
       top: false,
@@ -961,32 +1262,32 @@ class _ActionComposer extends StatelessWidget {
             TextField(
               controller: controller,
               focusNode: focusNode,
-              enabled: !disabled || answering,
+              enabled: !disabled || answeringLegacyQuestion,
               minLines: 1,
               maxLines: 3,
               textInputAction: TextInputAction.send,
               onSubmitted: (_) {
-                if (!disabled || answering) onSubmit();
+                if (!disabled || answeringLegacyQuestion) onSubmit();
               },
               decoration: InputDecoration(
                 hintText: hint,
                 border: const OutlineInputBorder(),
                 suffixIcon: IconButton(
-                  tooltip: answering ? '답변하기' : '행동하기',
-                  onPressed: (!disabled || answering) ? onSubmit : null,
+                  onPressed:
+                      (!disabled || answeringLegacyQuestion) ? onSubmit : null,
                   icon: const Icon(Icons.arrow_upward),
                 ),
               ),
             ),
-            if (!answering) ...[
+            if (!answeringLegacyQuestion) ...[
               const SizedBox(height: 8),
               Row(
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: disabled ? null : onMove,
+                      onPressed: canMove ? onMove : null,
                       icon: const Icon(Icons.directions_walk),
-                      label: const Text('이동'),
+                      label: const Text('무료 이동 1칸'),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -994,10 +1295,16 @@ class _ActionComposer extends StatelessWidget {
                     child: OutlinedButton.icon(
                       onPressed: disabled ? null : onTalk,
                       icon: const Icon(Icons.forum_outlined),
-                      label: const Text('대화'),
+                      label: const Text('대화 · 주행동'),
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '무료 이동은 주행동을 소모하지 않으며 한 차례에 한 번만 가능합니다.',
+                style: Theme.of(context).textTheme.bodySmall,
+                textAlign: TextAlign.center,
               ),
             ],
           ],
