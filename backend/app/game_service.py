@@ -1024,18 +1024,97 @@ class GameService:
             raise HTTPException(status_code=400, detail='대화할 인물을 선택하세요.')
         question = (request.input_text or '').strip()
         if not question:
-            raise HTTPException(status_code=400, detail='질문 내용을 입력하세요.')
+            raise HTTPException(status_code=400, detail='첫 질문을 입력하세요.')
+
         target_id = str(request.target_character_id)
         if session['player_character_id'] and target_id == str(session['player_character_id']):
-            raise HTTPException(status_code=400, detail='플레이어 자신의 캐릭터에게는 질문할 수 없습니다.')
+            raise HTTPException(status_code=400, detail='자기 자신과 대화할 수 없습니다.')
 
         await cur.execute(
             """
-            select sc.id, sc.display_name, cc.system_prompt, cc.private_backstory, cc.objective,
+            select sc.id, sc.display_name, st.location_code
+            from public.story_characters sc
+            join game_private.session_character_states st
+              on st.session_id = %s and st.character_id = sc.id
+            where sc.id = %s and sc.story_version_id = %s
+            """,
+            (session['id'], target_id, session['story_version_id']),
+        )
+        target = await cur.fetchone()
+        if target is None:
+            raise HTTPException(status_code=400, detail='대화할 수 없는 인물입니다.')
+        location_code = str(state.get('current_location') or '')
+        if target['location_code'] != location_code:
+            await self._insert_message(
+                cur, session['id'], turn['id'], 'system', None, 'system',
+                f"{target['display_name']}은(는) 현재 이 장소에 없습니다.",
+            )
+            return False
+
+        await self._insert_action(
+            cur, client_action_id, session['id'], turn['id'], request, payload=request.payload
+        )
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'player', session['player_character_id'], 'dialogue', question
+        )
+
+        agent_ctx = await self._agent_context_for_character(
+            cur, session, target_id, question
+        )
+        result = await self.agent_service.generate_conversation_reply(
+            ConversationReplyContext(
+                agent=agent_ctx,
+                history=[{'speaker': 'player', 'text': question}],
+                exchange_no=1,
+                max_exchanges=3,
+            )
+        )
+        reply = str(result.get('reply') or '').strip()
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'character', target_id, 'dialogue', reply
+        )
+        transcript = f"플레이어: {question}\n{target['display_name']}: {reply}"
+        await self._remember(
+            cur, session['id'], target_id, turn['id'], 'dialogue', transcript,
+            f"conversation:{client_action_id}", salience=75,
+        )
+        await self._record_witnesses(
+            cur, session, turn, location_code, transcript,
+            source_key=f"conversation-witness:{client_action_id}",
+            exclude_ids={target_id},
+        )
+
+        ended = bool(result.get('end_conversation'))
+        if ended:
+            await self._insert_message(
+                cur, session['id'], turn['id'], 'system', None, 'system',
+                f"{target['display_name']}이(가) 대화를 마무리했다.",
+            )
+            return True
+
+        state['active_conversation'] = {
+            'id': client_action_id,
+            'source': 'player_initiated',
+            'actor_id': target_id,
+            'actor_name': target['display_name'],
+            'location_code': location_code,
+            'exchange_count': 1,
+            'max_exchanges': 3,
+            'history': [
+                {'speaker': 'player', 'text': question},
+                {'speaker': target['display_name'], 'text': reply},
+            ],
+        }
+        return True
+
+    async def _agent_context_for_character(self, cur, session, character_id: str, question: str) -> AgentContext:
+        await cur.execute(
+            """
+            select sc.id, sc.display_name,
+                   cc.system_prompt, cc.private_backstory, cc.objective,
                    cc.personality, cc.initial_knowledge, cc.secrets, cc.lie_policy,
                    st.known_facts, st.false_beliefs, st.memory_summary,
-                   rc.world_prompt,
-                   pc.display_name as player_name
+                   rc.world_prompt, pc.display_name as player_name
             from public.story_characters sc
             join game_private.character_configs cc on cc.character_id = sc.id
             join game_private.session_character_states st
@@ -1044,87 +1123,202 @@ class GameService:
             left join public.story_characters pc on pc.id = %s
             where sc.id = %s and sc.story_version_id = %s
             """,
-            (session['id'], session['player_character_id'], target_id, session['story_version_id']),
+            (session['id'], session['player_character_id'], character_id, session['story_version_id']),
         )
-        target = await cur.fetchone()
-        if target is None:
-            raise HTTPException(status_code=400, detail='대화할 수 없는 인물입니다.')
-
-        await cur.execute(
-            """
-            select location_code from game_private.session_character_states
-            where session_id = %s and character_id = %s
-            """,
-            (session['id'], target_id),
-        )
-        target_state = await cur.fetchone()
-        if target_state is None or target_state['location_code'] != state.get('current_location'):
-            await self._insert_message(
-                cur,
-                session['id'],
-                turn['id'],
-                'system',
-                None,
-                'system',
-                f"{target['display_name']}은(는) 현재 이 장소에 없습니다. 행동은 소모되지 않았습니다.",
-            )
-            return False
-
+        row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=400, detail='대화 상대 정보를 찾을 수 없습니다.')
         await cur.execute(
             """
             select content from game_private.agent_memories
             where session_id = %s and character_id = %s
-            order by created_at desc limit 8
+            order by created_at desc limit 10
             """,
-            (session['id'], target_id),
+            (session['id'], character_id),
         )
-        memories = [row['content'] for row in await cur.fetchall()]
+        memories = [item['content'] for item in await cur.fetchall()]
         memories.reverse()
-
-        await self._insert_action(cur, client_action_id, session['id'], turn['id'], request, payload=request.payload)
-        await self._insert_message(
-            cur, session['id'], turn['id'], 'player', session['player_character_id'], 'dialogue', question
+        return AgentContext(
+            world_prompt=row['world_prompt'],
+            character_name=row['display_name'],
+            system_prompt=row['system_prompt'],
+            private_backstory=row['private_backstory'],
+            objective=row['objective'],
+            personality=_as_dict(row['personality']),
+            initial_knowledge=_as_list(row['initial_knowledge']),
+            secrets=_as_list(row['secrets']),
+            lie_policy=_as_dict(row['lie_policy']),
+            known_facts=_as_list(row['known_facts']),
+            false_beliefs=_as_list(row['false_beliefs']),
+            memory_summary=row['memory_summary'],
+            memories=memories,
+            player_name=row['player_name'] or '플레이어',
+            question=question,
         )
 
-        reply = await self.agent_service.generate_reply(
-            AgentContext(
-                world_prompt=target['world_prompt'],
-                character_name=target['display_name'],
-                system_prompt=target['system_prompt'],
-                private_backstory=target['private_backstory'],
-                objective=target['objective'],
-                personality=_as_dict(target['personality']),
-                initial_knowledge=_as_list(target['initial_knowledge']),
-                secrets=_as_list(target['secrets']),
-                lie_policy=_as_dict(target['lie_policy']),
-                known_facts=_as_list(target['known_facts']),
-                false_beliefs=_as_list(target['false_beliefs']),
-                memory_summary=target['memory_summary'],
-                memories=memories,
-                player_name=target['player_name'] or '플레이어',
-                question=question,
+    async def _continue_conversation(
+        self, cur, session, turn, state, request, client_action_id: str, conversation: dict[str, Any]
+    ) -> bool:
+        text = (request.input_text or '').strip()
+        if not text:
+            raise HTTPException(status_code=400, detail='대화 내용을 입력해 주세요.')
+        actor_id = str(conversation.get('actor_id') or '')
+        actor_name = str(conversation.get('actor_name') or '인물')
+        location_code = str(conversation.get('location_code') or state.get('current_location') or '')
+
+        await self._insert_action(
+            cur, client_action_id, session['id'], turn['id'], request,
+            payload={'conversation_id': conversation.get('id'), 'free_reply': True},
+        )
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'player', session['player_character_id'], 'dialogue', text
+        )
+
+        history = list(_as_list(conversation.get('history')))
+        history.append({'speaker': 'player', 'text': text})
+        exchange_no = int(conversation.get('exchange_count', 0)) + 1
+        agent_ctx = await self._agent_context_for_character(cur, session, actor_id, text)
+        result = await self.agent_service.generate_conversation_reply(
+            ConversationReplyContext(
+                agent=agent_ctx, history=history, exchange_no=exchange_no, max_exchanges=3
             )
         )
-        await self._insert_message(cur, session['id'], turn['id'], 'character', target_id, 'dialogue', reply)
+        reply = str(result.get('reply') or '').strip()
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'character', actor_id, 'dialogue', reply
+        )
+        history.append({'speaker': actor_name, 'text': reply})
+        transcript = f"플레이어: {text}\n{actor_name}: {reply}"
+        await self._remember(
+            cur, session['id'], actor_id, turn['id'], 'dialogue', transcript,
+            f"conversation-followup:{client_action_id}", salience=75,
+        )
+        if conversation.get('source') == 'detective_bonus':
+            await self._broadcast_memory(
+                cur, session, turn, transcript,
+                source_key=f"detective-dialogue:{client_action_id}",
+            )
+        elif location_code:
+            await self._record_witnesses(
+                cur, session, turn, location_code, transcript,
+                source_key=f"conversation-followup-witness:{client_action_id}",
+                exclude_ids={actor_id},
+            )
+
+        ended = bool(result.get('end_conversation')) or exchange_no >= 3
+        if ended:
+            state['active_conversation'] = None
+            await self._insert_message(
+                cur, session['id'], turn['id'], 'system', None, 'system',
+                f"{actor_name}과(와)의 대화가 끝났다.",
+            )
+            return True
+
+        conversation['history'] = history
+        conversation['exchange_count'] = exchange_no
+        state['active_conversation'] = conversation
+        return False
+
+    async def _present_in_conversation(
+        self, cur, session, turn, state, request, client_action_id: str, conversation: dict[str, Any]
+    ) -> bool:
+        clue_code = str(request.payload.get('clue_code') or '').strip()
+        inventory = {str(code) for code in _as_list(state.get('inventory_clues'))}
+        if not clue_code or clue_code not in inventory:
+            raise HTTPException(status_code=400, detail='현재 가지고 있는 물건만 대화 중에 제시할 수 있습니다.')
         await cur.execute(
             """
-            insert into game_private.agent_memories
-              (session_id, character_id, turn_id, memory_type, content, source_key, salience, confidence, is_secret)
-            values (%s, %s, %s, 'dialogue', %s, %s, 70, 1.0, false)
+            select clue_code, title, content, category
+            from public.session_clues
+            where session_id = %s and clue_code = %s
             """,
-            (session['id'], target_id, turn['id'], f"{target['player_name'] or '플레이어'}가 '{question}'라고 물었고 나는 '{reply}'라고 답했다.", client_action_id),
+            (session['id'], clue_code),
         )
-        await self._record_witnesses(
-            cur,
-            session,
-            turn,
-            str(state.get('current_location') or ''),
-            f"{target['player_name'] or '플레이어'}와 {target['display_name']}이(가) 대화하는 것을 들었다.",
-            source_key=f"conversation:{client_action_id}",
-            exclude_ids={target_id},
-        )
-        return True
+        clue = await cur.fetchone()
+        if clue is None:
+            raise HTTPException(status_code=400, detail='제시할 물건을 찾을 수 없습니다.')
 
+        actor_id = str(conversation.get('actor_id') or '')
+        actor_name = str(conversation.get('actor_name') or '인물')
+        location_code = str(conversation.get('location_code') or state.get('current_location') or '')
+        statement = f"'{clue['title']}'을(를) 꺼내 보여준다."
+        await self._insert_action(
+            cur, client_action_id, session['id'], turn['id'], request,
+            payload={'conversation_id': conversation.get('id'), 'clue_code': clue_code, 'free_reply': True},
+        )
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'player', session['player_character_id'], 'dialogue', statement
+        )
+
+        history = list(_as_list(conversation.get('history')))
+        history.append({'speaker': 'player', 'text': statement})
+        exchange_no = int(conversation.get('exchange_count', 0)) + 1
+        agent_ctx = await self._agent_context_for_character(
+            cur, session, actor_id,
+            f"플레이어가 물건 '{clue['title']}'을 보여줬다. 내용: {clue['content']}",
+        )
+        result = await self.agent_service.generate_conversation_reply(
+            ConversationReplyContext(
+                agent=agent_ctx, history=history, exchange_no=exchange_no, max_exchanges=3,
+                presented_item={'title': clue['title'], 'content': clue['content'], 'code': clue_code},
+            )
+        )
+        reply = str(result.get('reply') or '').strip()
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'character', actor_id, 'dialogue', reply
+        )
+        history.append({'speaker': actor_name, 'text': reply})
+        transcript = f"플레이어가 {clue['title']}을(를) 제시했다. {actor_name}: {reply}"
+        await self._remember(
+            cur, session['id'], actor_id, turn['id'], 'evidence', transcript,
+            f"conversation-evidence:{client_action_id}", salience=90,
+        )
+        if conversation.get('source') == 'detective_bonus':
+            await self._broadcast_memory(
+                cur, session, turn, transcript,
+                source_key=f"detective-evidence-dialogue:{client_action_id}",
+            )
+        elif location_code:
+            await self._record_witnesses(
+                cur, session, turn, location_code, transcript,
+                source_key=f"conversation-evidence-witness:{client_action_id}",
+                exclude_ids={actor_id},
+            )
+
+        ended = bool(result.get('end_conversation')) or exchange_no >= 3
+        if ended:
+            state['active_conversation'] = None
+            await self._insert_message(
+                cur, session['id'], turn['id'], 'system', None, 'system',
+                f"{actor_name}과(와)의 대화가 끝났다.",
+            )
+            return True
+        conversation['history'] = history
+        conversation['exchange_count'] = exchange_no
+        state['active_conversation'] = conversation
+        return False
+
+    async def _end_conversation(
+        self, cur, session, turn, state, request, client_action_id: str, conversation: dict[str, Any]
+    ) -> None:
+        actor_name = str(conversation.get('actor_name') or '인물')
+        await self._insert_action(
+            cur, client_action_id, session['id'], turn['id'], request,
+            payload={'conversation_id': conversation.get('id'), 'free_reply': True},
+        )
+        await self._insert_message(
+            cur, session['id'], turn['id'], 'system', None, 'system',
+            f"{actor_name}과(와)의 대화를 그만두었다.",
+        )
+        state['active_conversation'] = None
+
+    async def _finish_conversation_turn(self, cur, session, turn, state, conversation: dict[str, Any]) -> None:
+        source = str(conversation.get('source') or '')
+        if source in {'player_initiated', 'npc_initiated'}:
+            state['actor_index'] = int(state.get('actor_index', 0)) + 1
+            state['current_actor_id'] = None
+            state['current_actor_name'] = None
+        await self._advance_turn_sequence(cur, session, turn, state)
     async def _handle_present(self, cur, session, turn, state, request, client_action_id: str) -> bool:
         if request.target_character_id is None:
             raise HTTPException(status_code=400, detail='증거를 제시할 인물을 선택하세요.')
