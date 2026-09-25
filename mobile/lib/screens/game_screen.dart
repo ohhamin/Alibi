@@ -23,6 +23,7 @@ class _GameScreenState extends State<GameScreen> {
   bool _busy = false;
   bool _autoAdvanceScheduled = false;
   bool _conversationSheetOpen = false;
+  bool _submissionSheetOpen = false;
 
   Map<String, dynamic> get _session =>
       (_state['session'] as Map<String, dynamic>?) ?? const {};
@@ -58,6 +59,8 @@ class _GameScreenState extends State<GameScreen> {
       _state['current_location_detail'] as Map<String, dynamic>?;
   Map<String, dynamic>? get _pendingQuestion =>
       _state['pending_npc_question'] as Map<String, dynamic>?;
+  Map<String, dynamic>? get _pendingEvidenceSubmission =>
+      _state['pending_evidence_submission'] as Map<String, dynamic>?;
   Map<String, dynamic>? get _activeConversation =>
       _state['active_conversation'] as Map<String, dynamic>?;
 
@@ -71,6 +74,7 @@ class _GameScreenState extends State<GameScreen> {
       !_completed &&
       _activeConversation == null &&
       _pendingQuestion == null &&
+      _pendingEvidenceSubmission == null &&
       _currentActorId == _playerCharacterId;
   int get _movementRemaining =>
       (_publicState['movement_remaining'] as num?)?.toInt() ?? 0;
@@ -116,18 +120,32 @@ class _GameScreenState extends State<GameScreen> {
   void _afterStateChanged() {
     if (!mounted || _busy || _completed) return;
 
+    if (_pendingEvidenceSubmission != null && !_submissionSheetOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            _pendingEvidenceSubmission != null &&
+            !_submissionSheetOpen) {
+          _openEvidenceSubmissionSheet();
+        }
+      });
+      return;
+    }
+
+    if (_submissionSheetOpen) return;
+
     if (_activeConversation != null && !_conversationSheetOpen) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted &&
             _activeConversation != null &&
-            !_conversationSheetOpen) {
+            !_conversationSheetOpen &&
+            !_submissionSheetOpen) {
           _openConversationSheet();
         }
       });
       return;
     }
 
-    if (_pendingQuestion != null) return;
+    if (_pendingQuestion != null || _pendingEvidenceSubmission != null) return;
 
     if (_currentActorId != _playerCharacterId && !_autoAdvanceScheduled) {
       _autoAdvanceScheduled = true;
@@ -136,8 +154,10 @@ class _GameScreenState extends State<GameScreen> {
         if (!mounted ||
             _busy ||
             _completed ||
+            _submissionSheetOpen ||
             _activeConversation != null ||
             _pendingQuestion != null ||
+            _pendingEvidenceSubmission != null ||
             _currentActorId == _playerCharacterId) {
           return;
         }
@@ -339,7 +359,10 @@ class _GameScreenState extends State<GameScreen> {
                 _InfoBlock(title: '기본 성격', body: traits.join(' · ')),
               ],
               const SizedBox(height: 18),
-              Text('소지품', style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                '소지 증거 · 비공개',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
               const SizedBox(height: 8),
               if (_inventoryItems.isEmpty)
                 const Text('현재 가지고 있는 사건 물건이 없습니다.')
@@ -419,7 +442,7 @@ class _GameScreenState extends State<GameScreen> {
                 child: Row(
                   children: [
                     Text(
-                      '증거 수첩',
+                      '공개 증거 수첩',
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const Spacer(),
@@ -986,8 +1009,14 @@ class _GameScreenState extends State<GameScreen> {
   Future<Map<String, dynamic>?> _pickInventoryItem(
     BuildContext sheetContext,
   ) async {
-    final presentableItems =
-        _inventoryItems.isNotEmpty ? _inventoryItems : _clues;
+    final presentableItems = <Map<String, dynamic>>[
+      ..._inventoryItems,
+      ..._clues.where(
+        (clue) => !_inventoryItems.any(
+          (item) => item['clue_code'] == clue['clue_code'],
+        ),
+      ),
+    ];
 
     if (presentableItems.isEmpty) {
       await showDialog<void>(
@@ -1034,6 +1063,191 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
+  Future<void> _openEvidenceSubmissionSheet() async {
+    if (_submissionSheetOpen ||
+        _pendingEvidenceSubmission == null ||
+        !mounted) {
+      return;
+    }
+    _submissionSheetOpen = true;
+
+    Map<String, dynamic>? selected =
+        _inventoryItems.isNotEmpty ? _inventoryItems.first : null;
+    final opinionController = TextEditingController();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      builder: (sheetContext) => PopScope(
+        canPop: false,
+        child: StatefulBuilder(
+          builder: (sheetContext, setSheetState) {
+            final items = _inventoryItems;
+            if (_pendingEvidenceSubmission == null) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (sheetContext.mounted) Navigator.pop(sheetContext);
+              });
+              return const SizedBox.shrink();
+            }
+
+            if (selected != null &&
+                !items.any(
+                  (item) => item['clue_code'] == selected?['clue_code'],
+                )) {
+              selected = items.isNotEmpty ? items.first : null;
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  16,
+                  14,
+                  16,
+                  MediaQuery.viewInsetsOf(sheetContext).bottom + 14,
+                ),
+                child: SizedBox(
+                  height: MediaQuery.sizeOf(sheetContext).height * .74,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.gavel_outlined,
+                            color: AppTheme.brass,
+                          ),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Text(
+                              '라운드 종료 · 증거 제출',
+                              style: Theme.of(sheetContext)
+                                  .textTheme
+                                  .titleLarge,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '현재 소지한 증거 중 1개를 탐정에게 제출해야 합니다. '
+                        '제출한 증거와 아래 의견은 모든 인물에게 공개됩니다. '
+                        '숨기고 싶은 증거가 있다면 다른 증거를 선택하세요.',
+                        style: Theme.of(sheetContext).textTheme.bodyMedium,
+                      ),
+                      const SizedBox(height: 12),
+                      const Divider(height: 1),
+                      const SizedBox(height: 8),
+                      Expanded(
+                        child: items.isEmpty
+                            ? const Center(
+                                child: Text(
+                                  '제출할 증거가 없습니다. 자동으로 다음 라운드로 진행합니다.',
+                                ),
+                              )
+                            : ListView.separated(
+                                itemCount: items.length,
+                                separatorBuilder: (_, _) =>
+                                    const SizedBox(height: 8),
+                                itemBuilder: (context, index) {
+                                  final item = items[index];
+                                  final isSelected =
+                                      item['clue_code'] ==
+                                          selected?['clue_code'];
+                                  return Card(
+                                    clipBehavior: Clip.antiAlias,
+                                    child: ListTile(
+                                      selected: isSelected,
+                                      leading: _EvidenceThumb(
+                                        clueCode:
+                                            item['clue_code'] as String?,
+                                        size: 48,
+                                      ),
+                                      title: Text(
+                                        item['title'] as String? ?? '증거',
+                                      ),
+                                      subtitle: Text(
+                                        item['content'] as String? ?? '',
+                                        maxLines: 3,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      trailing: Radio<String>(
+                                        value: '${item['clue_code']}',
+                                        groupValue:
+                                            '${selected?['clue_code'] ?? ''}',
+                                        onChanged: (_) {
+                                          setSheetState(
+                                            () => selected = item,
+                                          );
+                                        },
+                                      ),
+                                      onTap: () {
+                                        setSheetState(
+                                          () => selected = item,
+                                        );
+                                      },
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: opinionController,
+                        minLines: 1,
+                        maxLines: 3,
+                        decoration: const InputDecoration(
+                          labelText: '제출 의견 (선택)',
+                          hintText: '예: 이 기록은 제 동선을 확인해 줄 수 있습니다.',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _busy || selected == null
+                              ? null
+                              : () async {
+                                  final item = selected;
+                                  if (item == null) return;
+                                  final opinion =
+                                      opinionController.text.trim();
+                                  await _act(
+                                    'submit_evidence',
+                                    inputText:
+                                        opinion.isEmpty ? null : opinion,
+                                    payload: {
+                                      'clue_code': item['clue_code'],
+                                    },
+                                  );
+                                  if (!sheetContext.mounted) return;
+                                  if (_pendingEvidenceSubmission == null) {
+                                    Navigator.pop(sheetContext);
+                                  } else {
+                                    setSheetState(() {});
+                                  }
+                                },
+                          icon: const Icon(Icons.public),
+                          label: const Text('탐정에게 제출하고 모두에게 공개'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+
+    opinionController.dispose();
+    _submissionSheetOpen = false;
+    _afterStateChanged();
+  }
+
   Future<void> _openConversationSheet() async {
     if (_conversationSheetOpen || _activeConversation == null || !mounted) {
       return;
@@ -1069,6 +1283,9 @@ class _GameScreenState extends State<GameScreen> {
               _characterById(conversation['actor_id'] as String?) ??
                   _characterByName(actorName);
           final playerCharacter = _characterById(_playerCharacterId);
+          final isPrivateInterrogation =
+              conversation['private'] == true ||
+              conversation['source'] == 'detective_interrogation';
 
           Future<void> refreshAfter(Future<void> task) async {
             await task;
@@ -1112,10 +1329,14 @@ class _GameScreenState extends State<GameScreen> {
                       ],
                     ),
                     const SizedBox(height: 6),
-                    const Align(
+                    Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        '이 대화의 후속 답변과 소지품 제시는 추가 행동을 소모하지 않습니다. 같은 방의 인물은 내용을 모두 듣습니다.',
+                        isPrivateInterrogation
+                            ? '비공개 취조입니다. 이 대화 내용은 탐정만 알게 됩니다. '
+                                '다만 탐정에게 증거를 제시하면 그 증거 자체는 즉시 모두에게 공개됩니다.'
+                            : '이 대화의 후속 답변과 소지품 제시는 추가 행동을 소모하지 않습니다. '
+                                '같은 방의 인물은 내용을 모두 듣습니다.',
                       ),
                     ),
                     const SizedBox(height: 10),
@@ -1290,6 +1511,7 @@ class _GameScreenState extends State<GameScreen> {
     final currentLocation =
         _publicState['current_location_name'] ?? '장소 미상';
     final pending = _pendingQuestion;
+    final pendingSubmission = _pendingEvidenceSubmission;
     final pendingActor = pending == null
         ? null
         : _characterById(pending['actor_id'] as String?) ??
@@ -1352,6 +1574,26 @@ class _GameScreenState extends State<GameScreen> {
             onLocationTap: _showCurrentLocation,
           ),
           if (_busy) const LinearProgressIndicator(minHeight: 2),
+          if (pendingSubmission != null && !_completed)
+            Card(
+              margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: ListTile(
+                leading: const Icon(
+                  Icons.inventory_2_outlined,
+                  color: AppTheme.brass,
+                ),
+                title: const Text('라운드 종료 증거 제출 필요'),
+                subtitle: const Text(
+                  '소지 증거 1개를 탐정에게 제출해야 다음 라운드로 진행됩니다.',
+                ),
+                trailing: TextButton(
+                  onPressed: _submissionSheetOpen
+                      ? null
+                      : _openEvidenceSubmissionSheet,
+                  child: const Text('제출'),
+                ),
+              ),
+            ),
           if (pending != null && !_completed)
             Card(
               margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
@@ -1384,7 +1626,9 @@ class _GameScreenState extends State<GameScreen> {
               ),
             ),
           ),
-          if (!_completed && _activeConversation == null)
+          if (!_completed &&
+              _activeConversation == null &&
+              _pendingEvidenceSubmission == null)
             _ActionComposer(
               disabled:
                   _busy || (!_isPlayerTurn && _pendingQuestion == null),
