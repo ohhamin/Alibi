@@ -1987,12 +1987,15 @@ class GameService:
                     message,
                     source_key=f"detective-bonus-question:{session['current_turn']}",
                 )
-                state['pending_npc_question'] = {
+                state['active_conversation'] = {
+                    'id': f"detective:{session['current_turn']}",
+                    'source': 'detective_bonus',
                     'actor_id': str(detective['id']),
                     'actor_name': detective['display_name'],
-                    'question': question,
-                    'source': 'detective_bonus',
                     'location_code': None,
+                    'exchange_count': 0,
+                    'max_exchanges': 3,
+                    'history': [{'speaker': detective['display_name'], 'text': question}],
                 }
                 return
 
