@@ -679,9 +679,26 @@ class GameService:
                     ):
                         turn_key = f"{session['current_turn']}:{actor_index}"
                         if state.get('player_turn_key') != turn_key:
+                            await cur.execute(
+                                """
+                                select count(*) as cnt
+                                from public.player_actions pa
+                                join public.game_turns gt on gt.id = pa.turn_id
+                                where pa.session_id = %s
+                                  and gt.turn_no = %s
+                                  and pa.action_type = any(%s)
+                                """,
+                                (
+                                    session['id'],
+                                    session['current_turn'],
+                                    ['act', 'ask', 'search', 'inspect', 'present'],
+                                ),
+                            )
+                            completed = min(2, int((await cur.fetchone())['cnt']))
+                            remaining = max(0, 2 - completed)
                             state['player_turn_key'] = turn_key
-                            state['actions_remaining'] = 2
-                            state['movement_remaining'] = 1
+                            state['actions_remaining'] = remaining
+                            state['movement_remaining'] = 1 if remaining > 0 else 0
                             state['current_actor_id'] = player_id
                             state['current_actor_name'] = await self._player_name(cur, session)
 
@@ -727,6 +744,15 @@ class GameService:
                             elif str(state.get('current_actor_id') or '') != str(session['player_character_id']):
                                 raise HTTPException(status_code=409, detail='아직 당신의 차례가 아닙니다.')
                             else:
+                                if (
+                                    request.action_type != 'move'
+                                    and int(state.get('actions_remaining', 0)) <= 0
+                                ):
+                                    raise HTTPException(
+                                        status_code=409,
+                                        detail='이번 차례의 주행동 2회를 모두 사용했습니다.',
+                                    )
+
                                 consumed = False
                                 if request.action_type == 'move':
                                     consumed = await self._handle_move(
