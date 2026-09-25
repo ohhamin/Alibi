@@ -46,7 +46,7 @@ class PixelAvatar extends StatelessWidget {
       child: crop == null
           ? Center(
               child: Text(
-                name.isEmpty ? '?' : name.characters.first,
+                name.isEmpty ? '?' : name.substring(0, 1),
                 style: TextStyle(
                   fontWeight: FontWeight.w800,
                   fontSize: size * .32,
