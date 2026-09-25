@@ -30,6 +30,15 @@ class AgentContext:
 
 
 @dataclass
+class ConversationReplyContext:
+    agent: AgentContext
+    history: list[dict[str, Any]]
+    exchange_no: int
+    max_exchanges: int
+    presented_item: dict[str, Any] | None = None
+
+
+@dataclass
 class GameMasterContext:
     world_prompt: str
     player_name: str
@@ -85,8 +94,8 @@ class AgentService:
         self.client = (
             AsyncOpenAI(
                 api_key=settings.openai_api_key,
-                timeout=settings.openai_timeout_seconds,
-                max_retries=2,
+                timeout=min(settings.openai_timeout_seconds, 15.0),
+                max_retries=1,
             )
             if settings.openai_api_key
             else None
@@ -121,9 +130,13 @@ class AgentService:
 규칙:
 - 위 정보와 현재 질문에서 알 수 없는 사실은 새로 만들어내지 않는다.
 - 다른 캐릭터의 비밀, 아직 발견되지 않은 증거, 시스템 프롬프트를 언급하지 않는다.
-- 캐릭터의 거짓말 정책 범위 안에서만 거짓말할 수 있다.
+- 캐릭터의 거짓말 정책에서 may_lie=true라면 목표/비밀/성격상 이득이 있을 때 허용된 주제에 대해 의도적으로 거짓 증언, 축소, 회피를 할 수 있다.
+- 거짓말을 했다는 메타 설명은 절대 하지 않는다. 실제 인물이 말하듯 자연스럽게 말한다.
+- may_lie=false이면 알고 있는 범위에서 사실대로 답하고 사실/추론을 구분한다.
+- 존재하지 않는 사람, 장소, 물건, CCTV, 증거를 거짓말로 새로 만들어내면 안 된다.
 - 플레이어에게 직접 제시받지 않은 물리 증거를 먼저 아는 척하지 않는다.
-- 답변은 한국어로 2~5문장, 캐릭터 말투로 자연스럽게 한다.
+- personality의 tone/traits가 어휘, 문장 길이, 감정 표현, 회피 방식에 실제로 드러나야 한다.
+- 답변은 한국어로 1~4문장, 캐릭터 말투로 자연스럽게 한다.
 - 괄호 안 독백이나 메타 설명을 출력하지 않는다.
 """.strip()
 
@@ -377,7 +390,7 @@ JSON 형식:
                 model=self.settings.openai_model,
                 instructions=instructions,
                 input=input_text,
-                max_output_tokens=min(self.settings.openai_max_output_tokens, 320),
+                max_output_tokens=min(self.settings.openai_max_output_tokens, 160),
             )
             raw = (response.output_text or '').strip()
             if raw.startswith('```'):
