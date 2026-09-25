@@ -788,7 +788,7 @@ class GameService:
                         await self._advance_round(cur, session, turn, state)
                     else:
                         conversation = _as_dict(state.get('active_conversation'))
-                            if conversation:
+                        if conversation:
                             if request.action_type == 'reply':
                                 ended = await self._continue_conversation(
                                     cur, session, turn, state, request, client_action_id, conversation
@@ -808,7 +808,9 @@ class GameService:
                                     detail='진행 중인 대화를 먼저 이어가거나 종료해 주세요.',
                                 )
                             if ended:
-                                await self._finish_conversation_turn(cur, session, turn, state, conversation)
+                                await self._finish_conversation_turn(
+                                    cur, session, turn, state, conversation
+                                )
                         else:
                             pending = _as_dict(state.get('pending_npc_question'))
                             if pending:
@@ -827,7 +829,10 @@ class GameService:
                                 if _as_dict(state.get('active_conversation')):
                                     pass
                                 elif str(state.get('current_actor_id') or '') != str(session['player_character_id']):
-                                    raise HTTPException(status_code=409, detail='아직 당신의 차례가 아닙니다.')
+                                    raise HTTPException(
+                                        status_code=409,
+                                        detail='아직 당신의 차례가 아닙니다.',
+                                    )
                                 else:
                                     if (
                                         request.action_type != 'move'
@@ -845,17 +850,30 @@ class GameService:
                                         )
                                     elif request.action_type == 'act':
                                         consumed = await self._handle_free_action(
-                                            cur, session, turn, state, request, client_action_id,
+                                            cur,
+                                            session,
+                                            turn,
+                                            state,
+                                            request,
+                                            client_action_id,
                                             action_text=(request.input_text or '').strip(),
                                         )
                                     elif request.action_type in {'search', 'inspect'}:
                                         legacy_text = (
                                             (request.input_text or '').strip()
-                                            or ('주변을 꼼꼼히 살펴본다.' if request.action_type == 'search'
-                                                else '눈에 보이는 것을 자세히 조사한다.')
+                                            or (
+                                                '주변을 꼼꼼히 살펴본다.'
+                                                if request.action_type == 'search'
+                                                else '눈에 보이는 것을 자세히 조사한다.'
+                                            )
                                         )
                                         consumed = await self._handle_free_action(
-                                            cur, session, turn, state, request, client_action_id,
+                                            cur,
+                                            session,
+                                            turn,
+                                            state,
+                                            request,
+                                            client_action_id,
                                             action_text=legacy_text,
                                         )
                                     elif request.action_type == 'ask':
@@ -866,10 +884,21 @@ class GameService:
                                         consumed = await self._handle_present(
                                             cur, session, turn, state, request, client_action_id
                                         )
-                                    elif request.action_type in {'reply', 'conversation_present', 'end_conversation'}:
-                                        raise HTTPException(status_code=409, detail='현재 진행 중인 대화가 없습니다.')
+                                    elif request.action_type in {
+                                        'reply',
+                                        'conversation_present',
+                                        'end_conversation',
+                                        'submit_evidence',
+                                    }:
+                                        raise HTTPException(
+                                            status_code=409,
+                                            detail='현재 이 행동을 사용할 수 없습니다.',
+                                        )
                                     else:
-                                        raise HTTPException(status_code=400, detail='지원하지 않는 행동입니다.')
+                                        raise HTTPException(
+                                            status_code=400,
+                                            detail='지원하지 않는 행동입니다.',
+                                        )
 
                                     if consumed:
                                         state['actions_remaining'] = max(
@@ -878,11 +907,17 @@ class GameService:
                                         if not _as_dict(state.get('active_conversation')):
                                             if int(state.get('actions_remaining', 0)) > 0:
                                                 state['movement_remaining'] = 1
-                                                state['current_actor_id'] = str(session['player_character_id'])
-                                                state['current_actor_name'] = await self._player_name(cur, session)
+                                                state['current_actor_id'] = str(
+                                                    session['player_character_id']
+                                                )
+                                                state['current_actor_name'] = await self._player_name(
+                                                    cur, session
+                                                )
                                             else:
                                                 state['movement_remaining'] = 0
-                                                state['actor_index'] = int(state.get('actor_index', 0)) + 1
+                                                state['actor_index'] = int(
+                                                    state.get('actor_index', 0)
+                                                ) + 1
                                                 state['current_actor_id'] = None
                                                 state['current_actor_name'] = None
                                                 await self._set_actor_preview(session, state)
