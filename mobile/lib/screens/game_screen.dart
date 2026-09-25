@@ -1520,7 +1520,7 @@ class _SceneCard extends StatelessWidget {
           children: [
             PixelLocationArt(
               locationCode: locationCode,
-              height: 190,
+              height: 228,
             ),
             const SizedBox(height: 12),
             Row(
