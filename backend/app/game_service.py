@@ -140,6 +140,7 @@ class GameService:
                     rules = _as_dict(story['turn_rules'])
                     state['round'] = 1
                     state['actions_per_round'] = 2
+                    state['action_rule_version'] = 2
                     state['actions_remaining'] = 0
                     state['movement_remaining'] = 0
                     state['active_conversation'] = None
@@ -1623,6 +1624,33 @@ class GameService:
             state.setdefault('active_conversation', None)
             state.setdefault('movement_remaining', 0)
             state.setdefault('player_turn_key', None)
+
+            if int(state.get('action_rule_version', 0)) < 2:
+                player_id = str(session['player_character_id']) if session['player_character_id'] else ''
+                player_index = next(
+                    (idx for idx, value in enumerate(order) if str(value) == player_id),
+                    -1,
+                )
+                if int(state.get('actor_index', 0)) == player_index:
+                    await cur.execute(
+                        """
+                        select count(*) as cnt
+                        from public.player_actions pa
+                        join public.game_turns gt on gt.id = pa.turn_id
+                        where pa.session_id = %s
+                          and gt.turn_no = %s
+                          and pa.action_type = any(%s)
+                        """,
+                        (
+                            session['id'],
+                            session['current_turn'],
+                            ['act', 'ask', 'search', 'inspect', 'present'],
+                        ),
+                    )
+                    completed = int((await cur.fetchone())['cnt'])
+                    state['actions_remaining'] = max(0, 2 - completed)
+                    state['movement_remaining'] = 1 if state['actions_remaining'] > 0 else 0
+                state['action_rule_version'] = 2
             return
         await cur.execute(
             """
