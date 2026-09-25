@@ -986,21 +986,37 @@ class _GameScreenState extends State<GameScreen> {
   Future<Map<String, dynamic>?> _pickInventoryItem(
     BuildContext sheetContext,
   ) async {
-    if (_inventoryItems.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('현재 제시할 소지품이 없습니다.')),
+    final presentableItems =
+        _inventoryItems.isNotEmpty ? _inventoryItems : _clues;
+
+    if (presentableItems.isEmpty) {
+      await showDialog<void>(
+        context: sheetContext,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('제시할 단서가 없습니다'),
+          content: const Text(
+            '먼저 장소를 조사해서 단서를 발견한 뒤 대화 중에 제시할 수 있습니다.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('확인'),
+            ),
+          ],
+        ),
       );
       return null;
     }
+
     return showDialog<Map<String, dynamic>>(
       context: sheetContext,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('소지품 제시'),
+        title: const Text('단서 제시'),
         content: SizedBox(
           width: double.maxFinite,
           child: ListView(
             shrinkWrap: true,
-            children: _inventoryItems
+            children: presentableItems
                 .map(
                   (item) => ListTile(
                     leading: _EvidenceThumb(
@@ -1233,7 +1249,7 @@ class _GameScreenState extends State<GameScreen> {
                                     );
                                   },
                             icon: const Icon(Icons.inventory_2_outlined),
-                            label: const Text('소지품 제시'),
+                            label: const Text('단서 제시'),
                           ),
                         ),
                         const SizedBox(width: 8),
