@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/api_client.dart';
+import '../core/app_theme.dart';
 
 class GameScreen extends StatefulWidget {
   const GameScreen({super.key, required this.initialState});
@@ -985,20 +986,35 @@ class _GameScreenState extends State<GameScreen> {
     return Scaffold(
       resizeToAvoidBottomInset: true,
       appBar: AppBar(
-        title: Text(_session['story_title'] as String? ?? 'ALIBI'),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'ACTIVE CASE',
+              style: TextStyle(
+                color: AppTheme.muted,
+                fontSize: 9,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1.4,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(_session['story_title'] as String? ?? 'ALIBI'),
+          ],
+        ),
         actions: [
           IconButton(
-            tooltip: '지도와 인물 위치',
+            tooltip: '현장 지도',
             onPressed: _showMap,
             icon: const Icon(Icons.map_outlined),
           ),
           IconButton(
-            tooltip: '내 정보',
+            tooltip: '내 인물 기록',
             onPressed: _showRole,
             icon: const Icon(Icons.badge_outlined),
           ),
           IconButton(
-            tooltip: '증거',
+            tooltip: '증거 수첩',
             onPressed: _showClues,
             icon: Badge(
               label: Text('${_clues.length}'),
@@ -1030,9 +1046,17 @@ class _GameScreenState extends State<GameScreen> {
               ),
             ),
           Expanded(
-            child: _completed
-                ? _EndingView(state: _state)
-                : _MessageTimeline(messages: _messages),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 360),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              child: KeyedSubtree(
+                key: ValueKey(_completed ? 'ending' : 'timeline'),
+                child: _completed
+                    ? _EndingView(state: _state)
+                    : _MessageTimeline(messages: _messages),
+              ),
+            ),
           ),
           if (!_completed && _activeConversation == null)
             _ActionComposer(
@@ -1121,20 +1145,24 @@ class _StatusPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      color: const Color(0xFF121418),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: Theme.of(context).dividerColor),
+        side: BorderSide(
+          color: onTap == null
+              ? const Color(0xFF2D3036)
+              : AppTheme.brass.withValues(alpha: .38),
+        ),
       ),
+      clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 11),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon, size: 17),
+              Icon(icon, size: 16, color: AppTheme.brass),
               const SizedBox(width: 5),
               Flexible(
                 child: Text(
@@ -1261,14 +1289,33 @@ class _MessageTimeline extends StatelessWidget {
 
         if (isNarration) {
           return Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Card(
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(
-                  item['content'] as String? ?? '',
-                  textAlign: TextAlign.center,
-                ),
+            padding: const EdgeInsets.symmetric(vertical: 7),
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(12, 11, 14, 11),
+              decoration: BoxDecoration(
+                color: const Color(0xFF111317),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF2B2E34)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(
+                      Icons.notes_rounded,
+                      size: 17,
+                      color: AppTheme.brass,
+                    ),
+                  ),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Text(
+                      item['content'] as String? ?? '',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ),
+                ],
               ),
             ),
           );
@@ -1282,9 +1329,19 @@ class _MessageTimeline extends StatelessWidget {
             padding: const EdgeInsets.all(13),
             decoration: BoxDecoration(
               color: isPlayer
-                  ? Theme.of(context).colorScheme.primaryContainer
-                  : Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(14),
+                  ? AppTheme.brass.withValues(alpha: .10)
+                  : const Color(0xFF171A1F),
+              borderRadius: BorderRadius.only(
+                topLeft: const Radius.circular(16),
+                topRight: const Radius.circular(16),
+                bottomLeft: Radius.circular(isPlayer ? 16 : 4),
+                bottomRight: Radius.circular(isPlayer ? 4 : 16),
+              ),
+              border: Border.all(
+                color: isPlayer
+                    ? AppTheme.brass.withValues(alpha: .28)
+                    : const Color(0xFF30333A),
+              ),
             ),
             child: Column(
               crossAxisAlignment:
@@ -1336,7 +1393,7 @@ class _ActionComposer extends StatelessWidget {
         ? '질문에 답변하세요...'
         : disabled
             ? '${currentActorName.isEmpty ? '다른 인물' : currentActorName}의 차례입니다.'
-            : '주행동을 입력하세요. 예: 직원용 서랍을 조사한다';
+            : '무엇을 할지 기록하세요. 예: 직원용 서랍을 조사한다';
 
     return SafeArea(
       top: false,
@@ -1347,11 +1404,18 @@ class _ActionComposer extends StatelessWidget {
           12,
           keyboardOpen ? 6 : 12,
         ),
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
+        decoration: const BoxDecoration(
+          color: Color(0xFF0D0F12),
           border: Border(
-            top: BorderSide(color: Theme.of(context).dividerColor),
+            top: BorderSide(color: Color(0xFF2B2E34)),
           ),
+          boxShadow: [
+            BoxShadow(
+              color: Color(0x66000000),
+              blurRadius: 18,
+              offset: Offset(0, -8),
+            ),
+          ],
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1371,11 +1435,11 @@ class _ActionComposer extends StatelessWidget {
               },
               decoration: InputDecoration(
                 hintText: hint,
-                border: const OutlineInputBorder(),
+                prefixIcon: const Icon(Icons.edit_note_outlined),
                 suffixIcon: IconButton(
                   onPressed:
                       (!disabled || answeringLegacyQuestion) ? onSubmit : null,
-                  icon: const Icon(Icons.arrow_upward),
+                  icon: const Icon(Icons.north_east),
                 ),
               ),
             ),
@@ -1387,7 +1451,7 @@ class _ActionComposer extends StatelessWidget {
                     child: OutlinedButton.icon(
                       onPressed: canMove ? onMove : null,
                       icon: const Icon(Icons.directions_walk),
-                      label: const Text('무료 이동 1칸'),
+                      label: const Text('인접 장소 이동'),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -1395,14 +1459,14 @@ class _ActionComposer extends StatelessWidget {
                     child: OutlinedButton.icon(
                       onPressed: disabled ? null : onTalk,
                       icon: const Icon(Icons.forum_outlined),
-                      label: const Text('대화 · 주행동'),
+                      label: const Text('인물과 대화'),
                     ),
                   ),
                 ],
               ),
               const SizedBox(height: 4),
               Text(
-                '주행동은 라운드당 2회이며, 각 주행동 전에 인접 장소 1칸을 무료로 이동할 수 있습니다.',
+                '라운드당 행동 2회 · 각 행동 전에 인접 장소 1칸을 무료로 이동할 수 있습니다.',
                 style: Theme.of(context).textTheme.bodySmall,
                 textAlign: TextAlign.center,
               ),
@@ -1436,7 +1500,7 @@ class _EndingViewState extends State<_EndingView> {
     return ListView(
       padding: const EdgeInsets.all(22),
       children: [
-        const Icon(Icons.manage_search, size: 68),
+        const Icon(Icons.manage_search, size: 68, color: AppTheme.brass),
         const SizedBox(height: 14),
         Text(
           '탐정의 최종 수사 결과',
@@ -1473,7 +1537,7 @@ class _EndingViewState extends State<_EndingView> {
           FilledButton.icon(
             onPressed: () => setState(() => _truthRevealed = true),
             icon: const Icon(Icons.visibility_outlined),
-            label: const Text('진짜 사건의 진실 보기'),
+            label: const Text('봉인된 진실 열기'),
           ),
         if (_truthRevealed) ...[
           const SizedBox(height: 10),
