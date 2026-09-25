@@ -190,10 +190,10 @@ class AgentService:
 - 현재 {ctx.exchange_no}/{ctx.max_exchanges}번째 왕복이다. 최대치를 넘길 수 없다.
 - 반드시 JSON 객체 하나만 출력한다.
 
-{
+{{
   "reply": "캐릭터의 실제 발화",
   "end_conversation": true
-}
+}}
 ''' .strip()
 
         payload = {
