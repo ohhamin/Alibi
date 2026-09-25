@@ -347,7 +347,9 @@ class _GameScreenState extends State<GameScreen> {
                 ..._inventoryItems.map(
                   (item) => ListTile(
                     contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.inventory_2_outlined),
+                    leading: _EvidenceThumb(
+                      clueCode: item['clue_code'] as String?,
+                    ),
                     title: Text(item['title'] as String? ?? ''),
                     subtitle: Text(item['content'] as String? ?? ''),
                   ),
@@ -442,6 +444,10 @@ class _GameScreenState extends State<GameScreen> {
                           );
                           return Card(
                             child: ListTile(
+                              leading: _EvidenceThumb(
+                                clueCode: clue['clue_code'] as String?,
+                                size: 54,
+                              ),
                               title: Text(clue['title'] as String? ?? ''),
                               subtitle: Text(clue['content'] as String? ?? ''),
                               trailing: holding
@@ -997,7 +1003,9 @@ class _GameScreenState extends State<GameScreen> {
             children: _inventoryItems
                 .map(
                   (item) => ListTile(
-                    leading: const Icon(Icons.inventory_2_outlined),
+                    leading: _EvidenceThumb(
+                      clueCode: item['clue_code'] as String?,
+                    ),
                     title: Text(item['title'] as String? ?? ''),
                     subtitle: Text(item['content'] as String? ?? ''),
                     onTap: () => Navigator.pop(dialogContext, item),
@@ -1955,6 +1963,44 @@ class _EndingViewState extends State<_EndingView> {
           ),
         ],
       ],
+    );
+  }
+}
+
+class _EvidenceThumb extends StatelessWidget {
+  const _EvidenceThumb({
+    required this.clueCode,
+    this.size = 46,
+  });
+
+  final String? clueCode;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final asset = AppAssets.evidenceForCode(clueCode);
+    if (asset == null) {
+      return SizedBox(
+        width: size,
+        height: size,
+        child: const Icon(Icons.inventory_2_outlined),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(7),
+      child: Container(
+        width: size,
+        height: size,
+        color: const Color(0xFF0E1013),
+        child: Image.asset(
+          asset,
+          fit: BoxFit.cover,
+          filterQuality: FilterQuality.none,
+          errorBuilder: (_, _, _) =>
+              const Icon(Icons.inventory_2_outlined),
+        ),
+      ),
     );
   }
 }
