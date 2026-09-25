@@ -1378,10 +1378,32 @@ class GameService:
 
     async def _finish_conversation_turn(self, cur, session, turn, state, conversation: dict[str, Any]) -> None:
         source = str(conversation.get('source') or '')
-        if source in {'player_initiated', 'npc_initiated'}:
+
+        if source == 'player_initiated':
+            if int(state.get('actions_remaining', 0)) > 0:
+                state['movement_remaining'] = 1
+                state['current_actor_id'] = str(session['player_character_id'])
+                state['current_actor_name'] = await self._player_name(cur, session)
+                return
+            state['movement_remaining'] = 0
             state['actor_index'] = int(state.get('actor_index', 0)) + 1
             state['current_actor_id'] = None
             state['current_actor_name'] = None
+            await self._set_actor_preview(session, state)
+            return
+
+        if source == 'npc_initiated':
+            state['actor_index'] = int(state.get('actor_index', 0)) + 1
+            state['current_actor_id'] = None
+            state['current_actor_name'] = None
+            await self._set_actor_preview(session, state)
+            return
+
+        if source == 'detective_bonus':
+            await self._advance_round(cur, session, turn, state)
+            await self._set_actor_preview(session, state)
+            return
+
         await self._set_actor_preview(session, state)
     async def _handle_present(self, cur, session, turn, state, request, client_action_id: str) -> bool:
         if request.target_character_id is None:
