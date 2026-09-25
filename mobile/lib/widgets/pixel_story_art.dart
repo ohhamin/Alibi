@@ -17,26 +17,22 @@ class PixelLocationArt extends StatelessWidget {
   final String? locationCode;
   final double height;
 
-  static const Map<String, Rect> _crops = {
-    'hall': Rect.fromLTWH(0.010, 0.012, 0.335, 0.438),
-    'cafe': Rect.fromLTWH(0.353, 0.012, 0.305, 0.438),
-    'office': Rect.fromLTWH(0.667, 0.012, 0.323, 0.438),
-    'storage': Rect.fromLTWH(0.010, 0.510, 0.480, 0.438),
-    'back-alley': Rect.fromLTWH(0.505, 0.510, 0.485, 0.438),
-  };
-
   @override
   Widget build(BuildContext context) {
-    final crop = _crops[locationCode] ?? _crops['hall']!;
-    return SizedBox(
-      width: double.infinity,
-      height: height,
-      child: SheetCropImage(
-        asset: AppAssets.locationSheet,
-        crop: crop,
-        fit: BoxFit.cover,
-        filterQuality: FilterQuality.high,
-        borderRadius: BorderRadius.circular(10),
+    final asset = AppAssets.locationForCode(locationCode) ??
+        AppAssets.locationForCode('hall')!;
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: SizedBox(
+        width: double.infinity,
+        height: height,
+        child: Image.asset(
+          asset,
+          fit: BoxFit.cover,
+          filterQuality: FilterQuality.high,
+          gaplessPlayback: true,
+        ),
       ),
     );
   }
