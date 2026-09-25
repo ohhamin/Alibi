@@ -907,8 +907,22 @@ class _GameScreenState extends State<GameScreen> {
                       .map(
                         (c) => DropdownMenuItem<String>(
                           value: c['id'] as String,
-                          child: Text(
-                            '${c['display_name']} · ${c['role_label'] ?? ''}',
+                          child: Row(
+                            children: [
+                              PixelAvatar(
+                                name: c['display_name'] as String? ?? '인물',
+                                code: c['code'] as String?,
+                                size: 28,
+                                borderRadius: 4,
+                              ),
+                              const SizedBox(width: 8),
+                              Flexible(
+                                child: Text(
+                                  '${c['display_name']} · ${c['role_label'] ?? ''}',
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       )
@@ -1027,6 +1041,10 @@ class _GameScreenState extends State<GameScreen> {
               (conversation['max_exchanges'] as num?)?.toInt() ?? 3;
           final actorName =
               conversation['actor_name'] as String? ?? '인물';
+          final actorCharacter =
+              _characterById(conversation['actor_id'] as String?) ??
+                  _characterByName(actorName);
+          final playerCharacter = _characterById(_playerCharacterId);
 
           Future<void> refreshAfter(Future<void> task) async {
             await task;
@@ -1052,8 +1070,12 @@ class _GameScreenState extends State<GameScreen> {
                   children: [
                     Row(
                       children: [
-                        const Icon(Icons.forum_outlined),
-                        const SizedBox(width: 8),
+                        PixelAvatar(
+                          name: actorName,
+                          code: actorCharacter?['code'] as String?,
+                          size: 44,
+                        ),
+                        const SizedBox(width: 10),
                         Expanded(
                           child: Text(
                             '$actorName과의 대화',
@@ -1083,40 +1105,65 @@ class _GameScreenState extends State<GameScreen> {
                           final speaker = item['speaker'] as String? ?? '';
                           final text = item['text'] as String? ?? '';
                           final isMe = speaker == 'player';
-                          return Align(
-                            alignment: isMe
-                                ? Alignment.centerRight
-                                : Alignment.centerLeft,
-                            child: Container(
-                              constraints:
-                                  const BoxConstraints(maxWidth: 310),
-                              margin:
-                                  const EdgeInsets.symmetric(vertical: 4),
-                              padding: const EdgeInsets.all(11),
-                              decoration: BoxDecoration(
+                          final bubble = Container(
+                            constraints: const BoxConstraints(maxWidth: 270),
+                            padding: const EdgeInsets.all(11),
+                            decoration: BoxDecoration(
+                              color: isMe
+                                  ? AppTheme.brass.withValues(alpha: .10)
+                                  : const Color(0xFF171A1F),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
                                 color: isMe
-                                    ? Theme.of(context)
-                                        .colorScheme
-                                        .primaryContainer
-                                    : Theme.of(context)
-                                        .colorScheme
-                                        .surfaceContainerHighest,
-                                borderRadius: BorderRadius.circular(12),
+                                    ? AppTheme.brass.withValues(alpha: .24)
+                                    : const Color(0xFF30333A),
                               ),
-                              child: Column(
-                                crossAxisAlignment: isMe
-                                    ? CrossAxisAlignment.end
-                                    : CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    isMe ? '나' : speaker,
-                                    style:
-                                        Theme.of(context).textTheme.labelSmall,
-                                  ),
-                                  const SizedBox(height: 3),
-                                  Text(text),
-                                ],
-                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: isMe
+                                  ? CrossAxisAlignment.end
+                                  : CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  isMe ? '나' : speaker,
+                                  style:
+                                      Theme.of(context).textTheme.labelSmall,
+                                ),
+                                const SizedBox(height: 3),
+                                Text(text),
+                              ],
+                            ),
+                          );
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Row(
+                              mainAxisAlignment: isMe
+                                  ? MainAxisAlignment.end
+                                  : MainAxisAlignment.start,
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: isMe
+                                  ? [
+                                      Flexible(child: bubble),
+                                      const SizedBox(width: 7),
+                                      PixelAvatar(
+                                        name: playerCharacter?['display_name']
+                                                as String? ??
+                                            '나',
+                                        code: playerCharacter?['code']
+                                            as String?,
+                                        size: 34,
+                                      ),
+                                    ]
+                                  : [
+                                      PixelAvatar(
+                                        name: actorName,
+                                        code: actorCharacter?['code']
+                                            as String?,
+                                        size: 34,
+                                      ),
+                                      const SizedBox(width: 7),
+                                      Flexible(child: bubble),
+                                    ],
                             ),
                           );
                         },
@@ -1219,6 +1266,10 @@ class _GameScreenState extends State<GameScreen> {
     final currentLocation =
         _publicState['current_location_name'] ?? '장소 미상';
     final pending = _pendingQuestion;
+    final pendingActor = pending == null
+        ? null
+        : _characterById(pending['actor_id'] as String?) ??
+            _characterByName(pending['actor_name'] as String?);
     final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
 
     return Scaffold(
@@ -1281,7 +1332,11 @@ class _GameScreenState extends State<GameScreen> {
             Card(
               margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
               child: ListTile(
-                leading: const Icon(Icons.chat_bubble_outline),
+                leading: PixelAvatar(
+                  name: pending['actor_name'] as String? ?? '인물',
+                  code: pendingActor?['code'] as String?,
+                  size: 42,
+                ),
                 title: Text(
                   '${pending['actor_name'] ?? '인물'}의 질문',
                 ),
@@ -1607,7 +1662,8 @@ class _MessageTimeline extends StatelessWidget {
           );
         }
 
-        final speakerId = item['speaker_character_id'] as String?;
+        final speakerId = item['speaker_character_id'] as String? ??
+            (isPlayer ? playerCharacterId : null);
         final character = _character(speakerId);
         final avatarName =
             character?['display_name'] as String? ?? (isPlayer ? '나' : speaker);
