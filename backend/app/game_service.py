@@ -1540,41 +1540,132 @@ class GameService:
         clue_code = str(request.payload.get('clue_code') or '').strip()
         if not clue_code:
             raise HTTPException(status_code=400, detail='제시할 단서를 선택해 주세요.')
+
         await cur.execute(
             """
-            select clue_code, title, content, category
-            from public.session_clues
-            where session_id = %s and clue_code = %s
+            select
+              c.code as clue_code,
+              c.player_title as title,
+              c.player_text as content,
+              c.category,
+              exists (
+                select 1 from public.session_clues pc
+                where pc.session_id = %s and pc.clue_code = c.code
+              ) as is_public,
+              exists (
+                select 1 from game_private.session_evidence_holdings h
+                where h.session_id = %s
+                  and h.clue_code = c.code
+                  and h.holder_character_id = %s
+                  and h.status = 'held'
+              ) as is_private_held
+            from game_private.story_clues c
+            where c.story_version_id = %s
+              and c.code = %s
+              and (
+                exists (
+                  select 1 from public.session_clues pc
+                  where pc.session_id = %s and pc.clue_code = c.code
+                )
+                or exists (
+                  select 1 from game_private.session_evidence_holdings h
+                  where h.session_id = %s
+                    and h.clue_code = c.code
+                    and h.holder_character_id = %s
+                    and h.status = 'held'
+                )
+              )
             """,
-            (session['id'], clue_code),
+            (
+                session['id'],
+                session['id'],
+                session['player_character_id'],
+                session['story_version_id'],
+                clue_code,
+                session['id'],
+                session['id'],
+                session['player_character_id'],
+            ),
         )
         clue = await cur.fetchone()
         if clue is None:
-            raise HTTPException(status_code=400, detail='아직 발견하지 않은 단서는 제시할 수 없습니다.')
+            raise HTTPException(status_code=400, detail='현재 알고 있거나 소지한 증거만 제시할 수 있습니다.')
 
         actor_id = str(conversation.get('actor_id') or '')
         actor_name = str(conversation.get('actor_name') or '인물')
         location_code = str(conversation.get('location_code') or state.get('current_location') or '')
+
+        await cur.execute(
+            """
+            select code, role_label
+            from public.story_characters
+            where id = %s and story_version_id = %s
+            """,
+            (actor_id, session['story_version_id']),
+        )
+        actor_meta = await cur.fetchone()
+        is_detective = bool(
+            actor_meta
+            and (
+                actor_meta['role_label'] == '탐정'
+                or actor_meta['code'] == 'kang-haejin'
+            )
+        )
+
         statement = f"'{clue['title']}'을(를) 꺼내 보여준다."
         await self._insert_action(
-            cur, client_action_id, session['id'], turn['id'], request,
-            payload={'conversation_id': conversation.get('id'), 'clue_code': clue_code, 'free_reply': True},
+            cur,
+            client_action_id,
+            session['id'],
+            turn['id'],
+            request,
+            payload={
+                'conversation_id': conversation.get('id'),
+                'clue_code': clue_code,
+                'free_reply': True,
+            },
         )
         await self._insert_message(
-            cur, session['id'], turn['id'], 'player', session['player_character_id'], 'dialogue', statement
+            cur,
+            session['id'],
+            turn['id'],
+            'player',
+            session['player_character_id'],
+            'dialogue',
+            statement,
         )
+
+        if is_detective and bool(clue['is_private_held']):
+            await self._publish_evidence(
+                cur,
+                session,
+                turn,
+                state,
+                clue_code,
+                str(session['player_character_id']),
+                source='detective_present',
+            )
 
         history = list(_as_list(conversation.get('history')))
         history.append({'speaker': 'player', 'text': statement})
         exchange_no = int(conversation.get('exchange_count', 0)) + 1
         agent_ctx = await self._agent_context_for_character(
-            cur, session, actor_id,
+            cur,
+            session,
+            actor_id,
             f"플레이어가 물건 '{clue['title']}'을 보여줬다. 내용: {clue['content']}",
         )
         result = await self.agent_service.generate_conversation_reply(
             ConversationReplyContext(
-                agent=agent_ctx, history=history, exchange_no=exchange_no, max_exchanges=3,
-                presented_item={'title': clue['title'], 'content': clue['content'], 'code': clue_code},
+                agent=agent_ctx,
+                history=history,
+                exchange_no=exchange_no,
+                max_exchanges=3,
+                presented_item={
+                    'title': clue['title'],
+                    'content': clue['content'],
+                    'code': clue_code,
+                },
             )
         )
         reply = str(result.get('reply') or '').strip()
@@ -1584,17 +1675,25 @@ class GameService:
         history.append({'speaker': actor_name, 'text': reply})
         transcript = f"플레이어가 {clue['title']}을(를) 제시했다. {actor_name}: {reply}"
         await self._remember(
-            cur, session['id'], actor_id, turn['id'], 'evidence', transcript,
-            f"conversation-evidence:{client_action_id}", salience=90,
+            cur,
+            session['id'],
+            actor_id,
+            turn['id'],
+            'evidence',
+            transcript,
+            f"conversation-evidence:{client_action_id}",
+            salience=90,
         )
-        if conversation.get('source') == 'detective_bonus':
-            await self._broadcast_memory(
-                cur, session, turn, transcript,
-                source_key=f"detective-evidence-dialogue:{client_action_id}",
-            )
-        elif location_code:
+
+        # Detective interview dialogue itself stays private. Only the evidence
+        # card becomes public when it is shown to the detective.
+        if not is_detective and location_code:
             await self._record_witnesses(
-                cur, session, turn, location_code, transcript,
+                cur,
+                session,
+                turn,
+                location_code,
+                transcript,
                 source_key=f"conversation-evidence-witness:{client_action_id}",
                 exclude_ids={actor_id},
             )
@@ -1603,7 +1702,12 @@ class GameService:
         if ended:
             state['active_conversation'] = None
             await self._insert_message(
-                cur, session['id'], turn['id'], 'system', None, 'system',
+                cur,
+                session['id'],
+                turn['id'],
+                'system',
+                None,
+                'system',
                 f"{actor_name}과(와)의 대화가 끝났다.",
             )
             return True
@@ -1674,46 +1778,18 @@ class GameService:
 
         await cur.execute(
             """
-            select clue_code, title, content
-            from public.session_clues
-            where session_id = %s and clue_code = %s
-            """,
-            (session['id'], clue_code),
-        )
-        clue = await cur.fetchone()
-        if clue is None:
-            raise HTTPException(status_code=400, detail='아직 발견하지 않은 증거입니다.')
-
-        await cur.execute(
-            """
-            select sc.id, sc.display_name, cc.system_prompt, cc.private_backstory, cc.objective,
-                   cc.personality, cc.initial_knowledge, cc.secrets, cc.lie_policy,
-                   st.known_facts, st.false_beliefs, st.memory_summary,
-                   rc.world_prompt,
-                   pc.display_name as player_name
+            select sc.id, sc.code, sc.display_name, sc.role_label, st.location_code
             from public.story_characters sc
-            join game_private.character_configs cc on cc.character_id = sc.id
             join game_private.session_character_states st
               on st.session_id = %s and st.character_id = sc.id
-            join game_private.story_runtime_configs rc on rc.story_version_id = sc.story_version_id
-            left join public.story_characters pc on pc.id = %s
             where sc.id = %s and sc.story_version_id = %s
             """,
-            (session['id'], session['player_character_id'], target_id, session['story_version_id']),
+            (session['id'], target_id, session['story_version_id']),
         )
         target = await cur.fetchone()
         if target is None:
             raise HTTPException(status_code=400, detail='증거를 제시할 수 없는 인물입니다.')
-
-        await cur.execute(
-            """
-            select location_code from game_private.session_character_states
-            where session_id = %s and character_id = %s
-            """,
-            (session['id'], target_id),
-        )
-        target_state = await cur.fetchone()
-        if target_state is None or target_state['location_code'] != state.get('current_location'):
+        if target['location_code'] != state.get('current_location'):
             await self._insert_message(
                 cur,
                 session['id'],
@@ -1727,14 +1803,53 @@ class GameService:
 
         await cur.execute(
             """
-            select content from game_private.agent_memories
-            where session_id = %s and character_id = %s
-            order by created_at desc limit 8
+            select
+              c.code as clue_code,
+              c.player_title as title,
+              c.player_text as content,
+              c.category,
+              exists (
+                select 1 from public.session_clues pc
+                where pc.session_id = %s and pc.clue_code = c.code
+              ) as is_public,
+              exists (
+                select 1 from game_private.session_evidence_holdings h
+                where h.session_id = %s
+                  and h.clue_code = c.code
+                  and h.holder_character_id = %s
+                  and h.status = 'held'
+              ) as is_private_held
+            from game_private.story_clues c
+            where c.story_version_id = %s
+              and c.code = %s
+              and (
+                exists (
+                  select 1 from public.session_clues pc
+                  where pc.session_id = %s and pc.clue_code = c.code
+                )
+                or exists (
+                  select 1 from game_private.session_evidence_holdings h
+                  where h.session_id = %s
+                    and h.clue_code = c.code
+                    and h.holder_character_id = %s
+                    and h.status = 'held'
+                )
+              )
             """,
-            (session['id'], target_id),
+            (
+                session['id'],
+                session['id'],
+                session['player_character_id'],
+                session['story_version_id'],
+                clue_code,
+                session['id'],
+                session['id'],
+                session['player_character_id'],
+            ),
         )
-        memories = [row['content'] for row in await cur.fetchall()]
-        memories.reverse()
+        clue = await cur.fetchone()
+        if clue is None:
+            raise HTTPException(status_code=400, detail='현재 알고 있거나 소지한 증거만 제시할 수 있습니다.')
 
         await self._insert_action(
             cur,
@@ -1744,30 +1859,31 @@ class GameService:
             request,
             payload={'clue_code': clue_code},
         )
+
+        is_detective = (
+            target['role_label'] == '탐정'
+            or target['code'] == 'kang-haejin'
+        )
+        if is_detective and bool(clue['is_private_held']):
+            await self._publish_evidence(
+                cur,
+                session,
+                turn,
+                state,
+                clue_code,
+                str(session['player_character_id']),
+                source='detective_present',
+            )
+
         prompt = (
             f"플레이어가 증거 '{clue['title']}'을 제시했다. "
             f"증거 내용은 '{clue['content']}'이다. "
             "이 증거를 직접 확인한 상황으로 받아들이고, 설정된 거짓말 정책과 알고 있는 사실 범위 안에서 반응하라."
         )
-        reply = await self.agent_service.generate_reply(
-            AgentContext(
-                world_prompt=target['world_prompt'],
-                character_name=target['display_name'],
-                system_prompt=target['system_prompt'],
-                private_backstory=target['private_backstory'],
-                objective=target['objective'],
-                personality=_as_dict(target['personality']),
-                initial_knowledge=_as_list(target['initial_knowledge']),
-                secrets=_as_list(target['secrets']),
-                lie_policy=_as_dict(target['lie_policy']),
-                known_facts=_as_list(target['known_facts']),
-                false_beliefs=_as_list(target['false_beliefs']),
-                memory_summary=target['memory_summary'],
-                memories=memories,
-                player_name=target['player_name'] or '플레이어',
-                question=prompt,
-            )
+        target_ctx = await self._agent_context_for_character(
+            cur, session, target_id, prompt
         )
+        reply = await self.agent_service.generate_reply(target_ctx)
         await self._insert_message(
             cur,
             session['id'],
@@ -1780,19 +1896,15 @@ class GameService:
         await self._insert_message(
             cur, session['id'], turn['id'], 'character', target_id, 'dialogue', reply
         )
-        await cur.execute(
-            """
-            insert into game_private.agent_memories
-              (session_id, character_id, turn_id, memory_type, content, source_key, salience, confidence, is_secret)
-            values (%s, %s, %s, 'evidence', %s, %s, 85, 1.0, false)
-            """,
-            (
-                session['id'],
-                target_id,
-                turn['id'],
-                f"플레이어가 증거 '{clue['title']}'을 제시했고 나는 '{reply}'라고 반응했다.",
-                client_action_id,
-            ),
+        await self._remember(
+            cur,
+            session['id'],
+            target_id,
+            turn['id'],
+            'evidence',
+            f"플레이어가 증거 '{clue['title']}'을 제시했고 나는 '{reply}'라고 반응했다.",
+            f"direct-evidence:{client_action_id}",
+            salience=85,
         )
         return True
 
