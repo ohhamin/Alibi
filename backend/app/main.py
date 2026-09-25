@@ -70,6 +70,11 @@ async def remove_session(session_id: str, user: AuthUser = Depends(get_current_u
 async def action(session_id: str, request: ActionRequest, user: AuthUser = Depends(get_current_user)):
     return await game_service.perform_action(user.id, session_id, request)
 
+@app.post('/api/v1/sessions/{session_id}/advance')
+async def advance(session_id: str, user: AuthUser = Depends(get_current_user)):
+    return await game_service.advance_game(user.id, session_id)
+
+
 
 @app.post('/api/v1/sessions/{session_id}/accuse')
 async def accuse(session_id: str, request: AccuseRequest, user: AuthUser = Depends(get_current_user)):
