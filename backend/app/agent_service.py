@@ -241,11 +241,11 @@ JSON 형식:
 
     async def choose_npc_action(self, ctx: NpcActionContext) -> dict[str, Any]:
         fallback = {
-            'action_type': 'move' if ctx.adjacent_locations else 'investigate',
-            'target_location_code': (
+            'move_to': (
                 ctx.adjacent_locations[0].get('code')
                 if ctx.adjacent_locations else None
             ),
+            'action_type': 'investigate',
             'target_character_id': None,
             'question': None,
             'intent': '자신의 목표에 따라 적극적으로 다음 단서를 찾는다.',
@@ -260,26 +260,26 @@ JSON 형식:
 개인 목표: {ctx.objective or '없음'}
 성격/행동 성향: {json.dumps(ctx.personality, ensure_ascii=False)}
 
-현재 이 캐릭터가 실제로 아는 정보만으로 다음 행동 하나를 정한다.
+현재 이 캐릭터가 실제로 아는 정보만으로 이번 차례를 정한다.
 다른 장소에서 벌어진 일이나 다른 인물의 비밀을 전지적으로 알 수 없다.
-한 턴에는 정확히 한 행동만 한다.
-허용 행동:
-- move: 인접 장소 하나로 이동
-- investigate: 현재 장소를 조사
-- talk: 현재 같은 장소의 인물 한 명에게 말을 건다
-- observe: 현재 장소에서 주변을 살핀다
+한 차례에는 '무료 이동 최대 1칸 + 주행동 1회'가 가능하다. 무료 이동은 생략해도 된다.
+주행동:
+- investigate: 이동 후 현재 장소를 조사
+- talk: 이동 후 같은 장소의 인물 한 명에게 말을 건다
+- observe: 이동 후 현재 장소에서 주변을 살핀다
 
 행동 원칙:
 - 성격과 개인 목표가 행동 선택에 실제로 드러나야 한다.
 - 같은 장소에 플레이어가 있으면 필요에 따라 플레이어에게도 talk를 선택할 수 있다.
-- 매번 observe만 반복하지 않는다. 가능한 경우 move / investigate / talk 중 의미 있는 행동을 우선한다.
-- 이미 최근에 반복한 행동은 피하고, 이동과 대화를 적극적으로 활용한다.
-- talk를 선택하면 상대에게 실제로 던질 한 문장 질문을 question에 작성한다.
+- 매번 observe만 반복하지 않는다. 가능한 경우 investigate / talk를 적극적으로 활용한다.
+- 이동 성향이 높으면 adjacent_locations의 인물/장소 정보를 보고 한 칸 이동을 자주 선택한다.
+- 이미 최근에 반복한 행동은 피한다.
+- talk를 선택하면 이동 후 같은 장소에 있게 되는 상대를 고르고 실제 질문 한 문장을 question에 작성한다.
 
 반드시 JSON 객체 하나만 출력한다.
 {{
-  "action_type": "move" | "investigate" | "talk" | "observe",
-  "target_location_code": "이동할 code 또는 null",
+  "move_to": "인접 장소 code 또는 null",
+  "action_type": "investigate" | "talk" | "observe",
   "target_character_id": "대화 대상 id 또는 null",
   "question": "talk일 때 실제 질문 한 문장 또는 null",
   "intent": "이 인물이 왜 이 행동을 하는지 짧게"
