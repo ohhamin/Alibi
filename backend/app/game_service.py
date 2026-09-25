@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 from .agent_service import (
     AgentContext,
     AgentService,
+    ConversationReplyContext,
     DetectiveBonusContext,
     DetectiveVerdictContext,
     GameMasterContext,
@@ -140,6 +141,9 @@ class GameService:
                     state['round'] = 1
                     state['actions_per_round'] = 1
                     state['actions_remaining'] = 0
+                    state['movement_remaining'] = 0
+                    state['active_conversation'] = None
+                    state['player_turn_key'] = None
                     state['max_rounds'] = int(rules.get('max_rounds', story['max_turns'] or 6))
                     state['current_location'] = starting_location['code']
                     state['current_location_name'] = starting_location['player_name']
@@ -278,7 +282,7 @@ class GameService:
                         'system',
                         (
                             f"당신은 {player['display_name']}({player['role_label']})입니다. "
-                            "모든 인물은 위에서부터 한 번씩 행동하며, 당신 차례에는 행동 1회를 할 수 있습니다."
+                            "모든 인물은 위에서부터 한 번씩 행동합니다. 당신 차례에는 인접 장소 1칸 무료 이동과 주행동 1회를 할 수 있습니다."
                         ),
                     )
 
@@ -456,6 +460,36 @@ class GameService:
                     None,
                 )
 
+                await cur.execute(
+                    """
+                    select pa.id, pa.action_type, pa.input_text, pa.payload, pa.created_at,
+                           gt.turn_no, tc.display_name as target_name
+                    from public.player_actions pa
+                    join public.game_turns gt on gt.id = pa.turn_id
+                    left join public.story_characters tc on tc.id = pa.target_character_id
+                    where pa.session_id = %s
+                    order by pa.created_at, pa.id
+                    """,
+                    (session_id,),
+                )
+                player_action_history = list(await cur.fetchall())
+
+                inventory_codes = [
+                    str(code) for code in _as_list(state.get('inventory_clues')) if str(code)
+                ]
+                inventory_items: list[dict[str, Any]] = []
+                if inventory_codes:
+                    await cur.execute(
+                        """
+                        select clue_code, title, content, category
+                        from public.session_clues
+                        where session_id = %s and clue_code = any(%s)
+                        order by discovered_at
+                        """,
+                        (session_id, inventory_codes),
+                    )
+                    inventory_items = list(await cur.fetchall())
+
                 return {
                     'session': session,
                     'current_turn': turn,
@@ -469,6 +503,9 @@ class GameService:
                     'character_locations': character_locations,
                     'known_character_locations': _as_dict(state.get('known_character_locations')),
                     'pending_npc_question': state.get('pending_npc_question'),
+                    'active_conversation': state.get('active_conversation'),
+                    'inventory_items': inventory_items,
+                    'player_action_history': player_action_history,
                     'current_actor_id': state.get('current_actor_id'),
                     'current_actor_name': state.get('current_actor_name'),
                     'ending': ending,
