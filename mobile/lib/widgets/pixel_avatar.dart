@@ -1,12 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../core/app_assets.dart';
-import 'sheet_crop_image.dart';
 
-/// Character portrait backed by the generated high-resolution artwork.
+/// Character portrait backed by an individual generated raster file.
 ///
 /// The historical class name is kept so existing game UI call sites do not
-/// need to change, but this no longer paints vector/pixel geometry.
+/// need to change. No vector or CustomPainter rendering is used here.
 class PixelAvatar extends StatelessWidget {
   const PixelAvatar({
     super.key,
@@ -21,19 +20,20 @@ class PixelAvatar extends StatelessWidget {
   final double size;
   final double borderRadius;
 
-  static const Map<String, Rect> _crops = {
-    // Top row
-    'seo-yuna': Rect.fromLTWH(0.017, 0.018, 0.297, 0.396),
-    'han-jun': Rect.fromLTWH(0.349, 0.018, 0.297, 0.396),
-    'min-seoyeon': Rect.fromLTWH(0.680, 0.018, 0.297, 0.396),
-    // Bottom row
-    'yoon-jiho': Rect.fromLTWH(0.124, 0.506, 0.325, 0.433),
-    'kang-haejin': Rect.fromLTWH(0.552, 0.506, 0.325, 0.433),
-  };
-
   @override
   Widget build(BuildContext context) {
-    final crop = _crops[code];
+    final asset = AppAssets.characterForCode(code);
+
+    Widget fallback() => Center(
+          child: Text(
+            name.isEmpty ? '?' : name.substring(0, 1),
+            style: TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: size * .32,
+            ),
+          ),
+        );
+
     return Container(
       width: size,
       height: size,
@@ -43,21 +43,14 @@ class PixelAvatar extends StatelessWidget {
         border: Border.all(color: const Color(0xFF3A3630)),
       ),
       clipBehavior: Clip.antiAlias,
-      child: crop == null
-          ? Center(
-              child: Text(
-                name.isEmpty ? '?' : name.substring(0, 1),
-                style: TextStyle(
-                  fontWeight: FontWeight.w800,
-                  fontSize: size * .32,
-                ),
-              ),
-            )
-          : SheetCropImage(
-              asset: AppAssets.characterSheet,
-              crop: crop,
+      child: asset == null
+          ? fallback()
+          : Image.asset(
+              asset,
               fit: BoxFit.cover,
               filterQuality: FilterQuality.high,
+              gaplessPlayback: true,
+              errorBuilder: (_, _, _) => fallback(),
             ),
     );
   }
