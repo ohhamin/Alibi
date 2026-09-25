@@ -50,6 +50,66 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<T> _withGameLoading<T>({
+    required String title,
+    required String detail,
+    required Future<T> Function() action,
+  }) async {
+    final dialogFuture = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      useRootNavigator: true,
+      builder: (dialogContext) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          contentPadding: const EdgeInsets.fromLTRB(24, 26, 24, 24),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                width: 42,
+                height: 42,
+                child: CircularProgressIndicator(strokeWidth: 3),
+              ),
+              const SizedBox(height: 18),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: Theme.of(dialogContext).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                detail,
+                textAlign: TextAlign.center,
+                style: Theme.of(dialogContext).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'ALIBI · CASE PREPARATION',
+                style: TextStyle(
+                  color: AppTheme.brass,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.3,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    await Future<void>.delayed(Duration.zero);
+    try {
+      return await action();
+    } finally {
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      await dialogFuture;
+    }
+  }
+
   Future<void> _start(Story story) async {
     final choices = story.characters.where((c) => c.isPlayerSelectable).toList();
     final selected = await showModalBottomSheet<StoryCharacter>(
@@ -98,12 +158,16 @@ class _HomeScreenState extends State<HomeScreen> {
     if (selected == null || !mounted) return;
 
     try {
-      final state = await _api.post(
-        '/sessions',
-        body: {
-          'story_version_id': story.storyVersionId,
-          'player_character_id': selected.id,
-        },
+      final state = await _withGameLoading<Map<String, dynamic>>(
+        title: '사건을 준비하는 중',
+        detail: '용의자 상태와 시작 증거품을 배치하고 있습니다.',
+        action: () => _api.post(
+          '/sessions',
+          body: {
+            'story_version_id': story.storyVersionId,
+            'player_character_id': selected.id,
+          },
+        ),
       );
       if (!mounted) return;
       await Navigator.push(
@@ -118,7 +182,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _resume(String sessionId) async {
     try {
-      final state = await _api.get('/sessions/$sessionId');
+      final state = await _withGameLoading<Map<String, dynamic>>(
+        title: '수사 기록을 불러오는 중',
+        detail: '현재 라운드와 인물들의 기억을 복원하고 있습니다.',
+        action: () => _api.get('/sessions/$sessionId'),
+      );
       if (!mounted) return;
       await Navigator.push(
         context,
