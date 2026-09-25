@@ -630,7 +630,7 @@ class GameService:
                                         state['actor_index'] = int(state.get('actor_index', 0)) + 1
                                         state['current_actor_id'] = None
                                         state['current_actor_name'] = None
-                                        await self._advance_turn_sequence(cur, session, turn, state)
+                                        await self._set_actor_preview(session, state)
 
                     await cur.execute(
                         """
@@ -1318,7 +1318,7 @@ class GameService:
             state['actor_index'] = int(state.get('actor_index', 0)) + 1
             state['current_actor_id'] = None
             state['current_actor_name'] = None
-        await self._advance_turn_sequence(cur, session, turn, state)
+        await self._set_actor_preview(session, state)
     async def _handle_present(self, cur, session, turn, state, request, client_action_id: str) -> bool:
         if request.target_character_id is None:
             raise HTTPException(status_code=400, detail='증거를 제시할 인물을 선택하세요.')
@@ -1572,51 +1572,59 @@ class GameService:
 
     async def _advance_turn_sequence(self, cur, session, turn, state) -> None:
         await self._ensure_turn_order(cur, session, state)
-        safety = 0
-        while session.get('status', 'active') == 'active':
-            safety += 1
-            if safety > 20:
-                raise HTTPException(status_code=500, detail='턴 진행 안전 한도를 초과했습니다.')
+        if _as_dict(state.get('active_conversation')) or _as_dict(state.get('pending_npc_question')):
+            return
 
-            if _as_dict(state.get('active_conversation')) or _as_dict(state.get('pending_npc_question')):
-                return
+        order = [str(value) for value in _as_list(state.get('actor_order'))]
+        index = int(state.get('actor_index', 0))
+        if index >= len(order):
+            await self._advance_round(cur, session, turn, state)
+            await self._set_actor_preview(session, state)
+            return
 
-            order = [str(value) for value in _as_list(state.get('actor_order'))]
-            index = int(state.get('actor_index', 0))
-            if index >= len(order):
-                await self._advance_round(cur, session, turn, state)
-                if (
-                    session.get('status') != 'active'
-                    or _as_dict(state.get('active_conversation'))
-                    or _as_dict(state.get('pending_npc_question'))
-                ):
-                    return
-                continue
+        actor_id = order[index]
+        turn_info = next(
+            (
+                row for row in _as_list(state.get('turn_order'))
+                if str(_as_dict(row).get('id') or '') == actor_id
+            ),
+            {},
+        )
+        state['current_actor_id'] = actor_id
+        state['current_actor_name'] = _as_dict(turn_info).get('name')
 
-            actor_id = order[index]
-            turn_info = next(
-                (
-                    row for row in _as_list(state.get('turn_order'))
-                    if str(_as_dict(row).get('id') or '') == actor_id
-                ),
-                {},
-            )
-            state['current_actor_id'] = actor_id
-            state['current_actor_name'] = _as_dict(turn_info).get('name')
+        if actor_id == str(session['player_character_id']):
+            turn_key = f"{session['current_turn']}:{index}"
+            if state.get('player_turn_key') != turn_key:
+                state['player_turn_key'] = turn_key
+                state['actions_remaining'] = 1
+                state['movement_remaining'] = 1
+            return
 
-            if actor_id == str(session['player_character_id']):
-                turn_key = f"{session['current_turn']}:{index}"
-                if state.get('player_turn_key') != turn_key:
-                    state['player_turn_key'] = turn_key
-                    state['actions_remaining'] = 1
-                    state['movement_remaining'] = 1
-                return
+        await self._run_single_npc_turn(cur, session, turn, state, actor_id)
+        if _as_dict(state.get('active_conversation')):
+            return
+        state['actor_index'] = index + 1
+        state['actions_remaining'] = 0
+        await self._set_actor_preview(session, state)
 
-            await self._run_single_npc_turn(cur, session, turn, state, actor_id)
-            if _as_dict(state.get('active_conversation')):
-                return
-            state['actor_index'] = index + 1
-            state['actions_remaining'] = 0
+    async def _set_actor_preview(self, session, state) -> None:
+        order = [str(value) for value in _as_list(state.get('actor_order'))]
+        index = int(state.get('actor_index', 0))
+        if index >= len(order):
+            state['current_actor_id'] = None
+            state['current_actor_name'] = '라운드 정리'
+            return
+        actor_id = order[index]
+        turn_info = next(
+            (
+                row for row in _as_list(state.get('turn_order'))
+                if str(_as_dict(row).get('id') or '') == actor_id
+            ),
+            {},
+        )
+        state['current_actor_id'] = actor_id
+        state['current_actor_name'] = _as_dict(turn_info).get('name')
 
     async def _run_single_npc_turn(self, cur, session, turn, state, actor_id: str) -> None:
         await cur.execute(
