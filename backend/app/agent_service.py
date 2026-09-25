@@ -436,6 +436,9 @@ JSON 형식:
 당신이 직접 확보한 사실과 기억만으로 최종 용의자 한 명을 지목한다.
 정답, 숨겨진 설정, 다른 인물의 비공개 기억에는 접근할 수 없다.
 후보 목록 밖 인물을 고르면 안 된다.
+reasoning에는 지목에 영향을 준 구체적인 단서·시간·진술을 최소 2개 언급한다.
+단순히 "가장 의심된다"처럼 결론만 쓰지 말고, 어떤 정보가 어떻게 연결되는지 설명한다.
+결정적 증거가 부족하면 그 불확실성도 마지막 문장에 명시한다.
 반드시 JSON 객체 하나만 출력한다.
 {{
   "accused_character_id": "후보 id",
@@ -457,26 +460,37 @@ JSON 형식:
     ) -> dict[str, Any]:
         if self.client is None:
             return fallback
-        try:
-            response = await self.client.responses.create(
-                model=self.settings.openai_model,
-                instructions=instructions,
-                input=input_text,
-                max_output_tokens=self.settings.openai_max_output_tokens,
-            )
-            raw = (response.output_text or '').strip()
-            if raw.startswith('```'):
-                raw = raw.split('\n', 1)[1] if '\n' in raw else raw
-                raw = raw.rsplit('```', 1)[0].strip()
-            start = raw.find('{')
-            end = raw.rfind('}')
-            if start >= 0 and end > start:
-                raw = raw[start:end + 1]
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else fallback
-        except (OpenAIError, json.JSONDecodeError, TypeError, ValueError):
-            logger.exception('OpenAI structured game response failed; using fallback')
-            return fallback
+
+        for attempt in range(2):
+            try:
+                retry_suffix = (
+                    ''
+                    if attempt == 0
+                    else '\n\n이전 응답을 파싱하지 못했다. 설명이나 코드펜스 없이 완전한 JSON 객체 하나만 짧게 다시 출력한다.'
+                )
+                response = await self.client.responses.create(
+                    model=self.settings.openai_model,
+                    instructions=instructions + retry_suffix,
+                    input=input_text,
+                    max_output_tokens=self.settings.openai_max_output_tokens,
+                )
+                raw = (response.output_text or '').strip()
+                if raw.startswith('```'):
+                    raw = raw.split('\n', 1)[1] if '\n' in raw else raw
+                    raw = raw.rsplit('```', 1)[0].strip()
+                start = raw.find('{')
+                end = raw.rfind('}')
+                if start >= 0 and end > start:
+                    raw = raw[start:end + 1]
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (OpenAIError, json.JSONDecodeError, TypeError, ValueError):
+                if attempt == 0:
+                    logger.warning('OpenAI structured response parse failed; retrying once')
+                else:
+                    logger.exception('OpenAI structured game response failed twice; using fallback')
+        return fallback
 
     def _fallback_detective_verdict(
         self,
