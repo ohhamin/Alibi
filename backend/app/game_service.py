@@ -792,7 +792,7 @@ class GameService:
                                 (
                                     session['id'],
                                     session['current_turn'],
-                                    ['act', 'ask', 'search', 'inspect', 'present'],
+                                    ['act', 'ask', 'search', 'inspect', 'present', 'skip'],
                                 ),
                             )
                             completed = min(2, int((await cur.fetchone())['cnt']))
@@ -914,6 +914,10 @@ class GameService:
                                         consumed = await self._handle_present(
                                             cur, session, turn, state, request, client_action_id
                                         )
+                                    elif request.action_type == 'skip':
+                                        consumed = await self._handle_skip(
+                                            cur, session, turn, state, request, client_action_id
+                                        )
                                     elif request.action_type in {
                                         'reply',
                                         'conversation_present',
@@ -977,6 +981,28 @@ class GameService:
             status_code=409,
             detail='최종 범인 지목은 수사 종료 시 AI 탐정이 수행합니다.',
         )
+
+    async def _handle_skip(
+        self, cur, session, turn, state, request, client_action_id: str
+    ) -> bool:
+        await self._insert_action(
+            cur,
+            client_action_id,
+            session['id'],
+            turn['id'],
+            request,
+            payload={'skipped': True},
+        )
+        await self._insert_message(
+            cur,
+            session['id'],
+            turn['id'],
+            'player',
+            session['player_character_id'],
+            'choice_result',
+            '아무 행동도 하지 않고 이번 행동을 넘겼다.',
+        )
+        return True
 
     async def _handle_move(self, cur, session, turn, state, request, client_action_id: str) -> bool:
         if int(state.get('movement_remaining', 0)) <= 0:
