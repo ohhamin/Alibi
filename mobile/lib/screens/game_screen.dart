@@ -1310,6 +1310,7 @@ class _ActionComposer extends StatelessWidget {
     required this.disabled,
     required this.answeringLegacyQuestion,
     required this.canMove,
+    required this.keyboardOpen,
     required this.controller,
     required this.focusNode,
     required this.currentActorName,
@@ -1321,6 +1322,7 @@ class _ActionComposer extends StatelessWidget {
   final bool disabled;
   final bool answeringLegacyQuestion;
   final bool canMove;
+  final bool keyboardOpen;
   final TextEditingController controller;
   final FocusNode focusNode;
   final String currentActorName;
@@ -1339,7 +1341,12 @@ class _ActionComposer extends StatelessWidget {
     return SafeArea(
       top: false,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+        padding: EdgeInsets.fromLTRB(
+          12,
+          8,
+          12,
+          keyboardOpen ? 6 : 12,
+        ),
         decoration: BoxDecoration(
           color: Theme.of(context).colorScheme.surface,
           border: Border(
@@ -1354,7 +1361,10 @@ class _ActionComposer extends StatelessWidget {
               focusNode: focusNode,
               enabled: !disabled || answeringLegacyQuestion,
               minLines: 1,
-              maxLines: 3,
+              maxLines: keyboardOpen ? 2 : 3,
+              scrollPadding: EdgeInsets.only(
+                bottom: keyboardOpen ? 140 : 24,
+              ),
               textInputAction: TextInputAction.send,
               onSubmitted: (_) {
                 if (!disabled || answeringLegacyQuestion) onSubmit();
@@ -1369,7 +1379,7 @@ class _ActionComposer extends StatelessWidget {
                 ),
               ),
             ),
-            if (!answeringLegacyQuestion) ...[
+            if (!answeringLegacyQuestion && !keyboardOpen) ...[
               const SizedBox(height: 8),
               Row(
                 children: [
@@ -1392,7 +1402,7 @@ class _ActionComposer extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               Text(
-                '무료 이동은 주행동을 소모하지 않으며 한 차례에 한 번만 가능합니다.',
+                '주행동은 라운드당 2회이며, 각 주행동 전에 인접 장소 1칸을 무료로 이동할 수 있습니다.',
                 style: Theme.of(context).textTheme.bodySmall,
                 textAlign: TextAlign.center,
               ),
@@ -1404,37 +1414,36 @@ class _ActionComposer extends StatelessWidget {
   }
 }
 
-class _EndingView extends StatelessWidget {
+class _EndingView extends StatefulWidget {
   const _EndingView({required this.state});
 
   final Map<String, dynamic> state;
 
   @override
+  State<_EndingView> createState() => _EndingViewState();
+}
+
+class _EndingViewState extends State<_EndingView> {
+  bool _truthRevealed = false;
+
+  @override
   Widget build(BuildContext context) {
-    final ending = state['ending'] as Map<String, dynamic>?;
-    final solution = state['solution'] as Map<String, dynamic>?;
+    final ending = widget.state['ending'] as Map<String, dynamic>?;
+    final solution = widget.state['solution'] as Map<String, dynamic>?;
+    final verdict =
+        widget.state['detective_verdict'] as Map<String, dynamic>?;
 
     return ListView(
       padding: const EdgeInsets.all(22),
       children: [
-        Icon(
-          ending?['is_success'] == true
-              ? Icons.check_circle
-              : Icons.nightlight,
-          size: 72,
-        ),
-        const SizedBox(height: 16),
+        const Icon(Icons.manage_search, size: 68),
+        const SizedBox(height: 14),
         Text(
-          ending?['title'] as String? ?? '사건 종료',
+          '탐정의 최종 수사 결과',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.headlineMedium,
         ),
-        const SizedBox(height: 12),
-        Text(
-          ending?['ending_text'] as String? ?? '',
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 28),
+        const SizedBox(height: 18),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(18),
@@ -1442,22 +1451,74 @@ class _EndingView extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '사건의 진실',
+                  verdict?['detective_name'] as String? ?? '탐정',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '최종 지목: ${verdict?['accused_name'] ?? '알 수 없는 인물'}',
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 10),
-                Text('범인: ${solution?['culprit_name'] ?? '알 수 없음'}'),
-                const SizedBox(height: 8),
-                Text(solution?['canonical_explanation'] as String? ?? ''),
+                Text(
+                  verdict?['reasoning'] as String? ??
+                      '탐정의 최종 추론을 불러오지 못했습니다.',
+                ),
               ],
             ),
           ),
         ),
-        const SizedBox(height: 18),
-        FilledButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('사건 목록으로'),
-        ),
+        const SizedBox(height: 16),
+        if (!_truthRevealed)
+          FilledButton.icon(
+            onPressed: () => setState(() => _truthRevealed = true),
+            icon: const Icon(Icons.visibility_outlined),
+            label: const Text('진짜 사건의 진실 보기'),
+          ),
+        if (_truthRevealed) ...[
+          const SizedBox(height: 10),
+          const Divider(),
+          const SizedBox(height: 12),
+          Text(
+            ending?['title'] as String? ?? '사건의 결말',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.headlineSmall,
+          ),
+          const SizedBox(height: 10),
+          Text(
+            ending?['ending_text'] as String? ?? '',
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 22),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '진짜 사건의 진실',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '실제 범인: ${solution?['culprit_name'] ?? '알 수 없음'}',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    solution?['canonical_explanation'] as String? ?? '',
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 18),
+          FilledButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('사건 목록으로'),
+          ),
+        ],
       ],
     );
   }
