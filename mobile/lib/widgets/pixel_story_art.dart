@@ -56,7 +56,6 @@ class _PixelLocationPainter extends CustomPainter {
 
   static const bg = Color(0xFF0B0D10);
   static const wall = Color(0xFF202329);
-  static const wall2 = Color(0xFF292B2D);
   static const wood = Color(0xFF4A3626);
   static const wood2 = Color(0xFF6A4A2E);
   static const paper = Color(0xFFC7B998);
@@ -256,7 +255,9 @@ class _PixelEvidencePainter extends CustomPainter {
         break;
       case 'clue-coffee-receipt':
         r(13, 8, 22, 32, paper);
-        for (double y = 14; y < 35; y += 5) r(17, y, 14, 2, ink);
+        for (double y = 14; y < 35; y += 5) {
+          r(17, y, 14, 2, ink);
+        }
         r(20, 9, 8, 3, red);
         break;
       case 'clue-brass-dust':
@@ -267,7 +268,9 @@ class _PixelEvidencePainter extends CustomPainter {
         break;
       case 'clue-expense':
         r(10, 9, 28, 31, paper);
-        for (double y = 15; y < 35; y += 5) r(14, y, 20, 2, ink);
+        for (double y = 15; y < 35; y += 5) {
+          r(14, y, 20, 2, ink);
+        }
         r(27, 30, 8, 5, red);
         break;
       case 'clue-body-time':
@@ -287,7 +290,9 @@ class _PixelEvidencePainter extends CustomPainter {
         r(16, 8, 3, 6, bg);
         r(25, 8, 3, 7, bg);
         r(33, 8, 3, 5, bg);
-        for (double y = 17; y < 34; y += 5) r(14, y, 20, 2, ink);
+        for (double y = 17; y < 34; y += 5) {
+          r(14, y, 20, 2, ink);
+        }
         r(15, 35, 17, 2, red);
         break;
       case 'clue-door-lock':
@@ -298,7 +303,9 @@ class _PixelEvidencePainter extends CustomPainter {
       case 'clue-manuscript':
         r(8, 11, 25, 29, paper);
         r(15, 7, 25, 29, const Color(0xFFB8AA8E));
-        for (double y = 14; y < 31; y += 5) r(19, y, 16, 2, ink);
+        for (double y = 14; y < 31; y += 5) {
+          r(19, y, 16, 2, ink);
+        }
         r(21, 19, 10, 2, red);
         break;
       case 'clue-safe-key':
