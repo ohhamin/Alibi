@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../core/api_client.dart';
+import '../core/app_assets.dart';
 import '../core/app_theme.dart';
+import '../widgets/pixel_avatar.dart';
 
 class GameScreen extends StatefulWidget {
   const GameScreen({super.key, required this.initialState});
@@ -28,6 +30,11 @@ class _GameScreenState extends State<GameScreen> {
       (_session['public_state'] as Map<String, dynamic>?) ?? const {};
   List<Map<String, dynamic>> get _messages =>
       ((_state['messages'] as List?) ?? const []).cast<Map<String, dynamic>>();
+  List<Map<String, dynamic>> get _characters =>
+      ((_state['characters'] as List?) ?? const []).cast<Map<String, dynamic>>();
+  List<Map<String, dynamic>> get _characterDossiers =>
+      ((_state['character_dossiers'] as List?) ?? const [])
+          .cast<Map<String, dynamic>>();
   List<Map<String, dynamic>> get _clues =>
       ((_state['clues'] as List?) ?? const []).cast<Map<String, dynamic>>();
   List<Map<String, dynamic>> get _locations =>
@@ -200,6 +207,22 @@ class _GameScreenState extends State<GameScreen> {
       }
     }
     return code;
+  }
+
+  Map<String, dynamic>? _characterById(String? id) {
+    if (id == null || id.isEmpty) return null;
+    for (final character in _characters) {
+      if ('${character['id']}' == id) return character;
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _characterByName(String? name) {
+    if (name == null || name.isEmpty) return null;
+    for (final character in _characters) {
+      if (character['display_name'] == name) return character;
+    }
+    return null;
   }
 
   String _clueTitle(String? code) {
@@ -436,6 +459,220 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
+  Future<void> _showCharacterDossiers() async {
+    final dossiers = _characterDossiers.isNotEmpty
+        ? _characterDossiers
+        : _characters
+            .map(
+              (character) => <String, dynamic>{
+                ...character,
+                'is_player': '${character['id']}' == _playerCharacterId,
+                'known_statements': const <String>[],
+                'related_clues': const <Map<String, dynamic>>[],
+              },
+            )
+            .toList();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * .84,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 16, 12, 10),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.people_alt_outlined,
+                      color: AppTheme.brass,
+                    ),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '등장인물 기록',
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
+                          Text(
+                            '지금까지 직접 확인한 정보만 기록됩니다.',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 28),
+                  itemCount: dossiers.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 10),
+                  itemBuilder: (context, index) {
+                    final dossier = dossiers[index];
+                    final statements =
+                        ((dossier['known_statements'] as List?) ?? const [])
+                            .map((e) => '$e')
+                            .where((e) => e.trim().isNotEmpty)
+                            .toList();
+                    final relatedClues =
+                        ((dossier['related_clues'] as List?) ?? const [])
+                            .cast<Map<String, dynamic>>();
+                    final isPlayer = dossier['is_player'] == true;
+                    final locationName =
+                        dossier['known_location_name'] as String?;
+                    final name =
+                        dossier['display_name'] as String? ?? '알 수 없는 인물';
+                    final role = dossier['role_label'] as String? ?? '';
+
+                    return Card(
+                      clipBehavior: Clip.antiAlias,
+                      child: ExpansionTile(
+                        leading: PixelAvatar(
+                          name: name,
+                          code: dossier['code'] as String?,
+                          size: 48,
+                        ),
+                        title: Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                name,
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                            ),
+                            if (isPlayer) ...[
+                              const SizedBox(width: 7),
+                              const Chip(
+                                visualDensity: VisualDensity.compact,
+                                label: Text('나'),
+                              ),
+                            ],
+                          ],
+                        ),
+                        subtitle: Text(role),
+                        childrenPadding:
+                            const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                        children: [
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              dossier['public_bio'] as String? ??
+                                  '공개된 기본 정보가 없습니다.',
+                            ),
+                          ),
+                          if (locationName != null &&
+                              locationName.trim().isNotEmpty) ...[
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                const Icon(
+                                  Icons.place_outlined,
+                                  size: 17,
+                                  color: AppTheme.brass,
+                                ),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    '확인된 위치 · $locationName',
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                          const SizedBox(height: 14),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              '알게 된 내용',
+                              style: Theme.of(context).textTheme.labelLarge,
+                            ),
+                          ),
+                          const SizedBox(height: 7),
+                          if (statements.isEmpty && relatedClues.isEmpty)
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                '아직 추가로 확인한 내용이 없습니다.',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            )
+                          else ...[
+                            ...statements.map(
+                              (statement) => Padding(
+                                padding: const EdgeInsets.only(bottom: 7),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text(
+                                      '• ',
+                                      style: TextStyle(color: AppTheme.brass),
+                                    ),
+                                    Expanded(child: Text(statement)),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            ...relatedClues.map(
+                              (clue) => Padding(
+                                padding: const EdgeInsets.only(top: 5),
+                                child: Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.all(10),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF0E1013),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: const Color(0xFF2D3036),
+                                    ),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        clue['title'] as String? ?? '관련 증거',
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .labelLarge,
+                                      ),
+                                      const SizedBox(height: 3),
+                                      Text(
+                                        clue['content'] as String? ?? '',
+                                        style:
+                                            Theme.of(context).textTheme.bodySmall,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _showMap() async {
     await showModalBottomSheet<void>(
       context: context,
@@ -553,6 +790,7 @@ class _GameScreenState extends State<GameScreen> {
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
           child: _SceneCard(
+            locationCode: currentLocation,
             locationName: currentName,
             description:
                 _currentLocationDetail?['description'] as String? ?? '',
@@ -1009,6 +1247,11 @@ class _GameScreenState extends State<GameScreen> {
             icon: const Icon(Icons.map_outlined),
           ),
           IconButton(
+            tooltip: '등장인물 기록',
+            onPressed: _showCharacterDossiers,
+            icon: const Icon(Icons.people_alt_outlined),
+          ),
+          IconButton(
             tooltip: '내 인물 기록',
             onPressed: _showRole,
             icon: const Icon(Icons.badge_outlined),
@@ -1054,7 +1297,11 @@ class _GameScreenState extends State<GameScreen> {
                 key: ValueKey(_completed ? 'ending' : 'timeline'),
                 child: _completed
                     ? _EndingView(state: _state)
-                    : _MessageTimeline(messages: _messages),
+                    : _MessageTimeline(
+                        messages: _messages,
+                        characters: _characters,
+                        playerCharacterId: _playerCharacterId,
+                      ),
               ),
             ),
           ),
@@ -1183,6 +1430,7 @@ class _StatusPill extends StatelessWidget {
 
 class _SceneCard extends StatelessWidget {
   const _SceneCard({
+    required this.locationCode,
     required this.locationName,
     required this.description,
     required this.people,
@@ -1190,6 +1438,7 @@ class _SceneCard extends StatelessWidget {
     required this.onMap,
   });
 
+  final String? locationCode;
   final String locationName;
   final String description;
   final List<Map<String, dynamic>> people;
@@ -1198,13 +1447,31 @@ class _SceneCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final imageAsset = AppAssets.locationForCode(locationCode);
+
     return Card(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      clipBehavior: Clip.antiAlias,
       child: Padding(
         padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (imageAsset != null) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: AspectRatio(
+                  aspectRatio: 4 / 3,
+                  child: Image.asset(
+                    imageAsset,
+                    fit: BoxFit.cover,
+                    filterQuality: FilterQuality.none,
+                    errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             Row(
               children: [
                 const Icon(Icons.room_outlined),
@@ -1248,7 +1515,12 @@ class _SceneCard extends StatelessWidget {
                 children: people
                     .map(
                       (p) => Chip(
-                        avatar: const Icon(Icons.person_outline, size: 17),
+                        avatar: PixelAvatar(
+                          name: p['display_name'] as String? ?? '인물',
+                          code: p['code'] as String?,
+                          size: 24,
+                          borderRadius: 4,
+                        ),
                         label: Text(p['display_name'] as String? ?? '인물'),
                       ),
                     )
@@ -1262,9 +1534,23 @@ class _SceneCard extends StatelessWidget {
 }
 
 class _MessageTimeline extends StatelessWidget {
-  const _MessageTimeline({required this.messages});
+  const _MessageTimeline({
+    required this.messages,
+    required this.characters,
+    required this.playerCharacterId,
+  });
 
   final List<Map<String, dynamic>> messages;
+  final List<Map<String, dynamic>> characters;
+  final String? playerCharacterId;
+
+  Map<String, dynamic>? _character(String? id) {
+    if (id == null) return null;
+    for (final character in characters) {
+      if ('${character['id']}' == id) return character;
+    }
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1321,40 +1607,69 @@ class _MessageTimeline extends StatelessWidget {
           );
         }
 
-        return Align(
-          alignment: isPlayer ? Alignment.centerRight : Alignment.centerLeft,
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 340),
-            margin: const EdgeInsets.symmetric(vertical: 5),
-            padding: const EdgeInsets.all(13),
-            decoration: BoxDecoration(
+        final speakerId = item['speaker_character_id'] as String?;
+        final character = _character(speakerId);
+        final avatarName =
+            character?['display_name'] as String? ?? (isPlayer ? '나' : speaker);
+        final avatarCode = character?['code'] as String?;
+        final bubble = Container(
+          constraints: const BoxConstraints(maxWidth: 300),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: isPlayer
+                ? AppTheme.brass.withValues(alpha: .10)
+                : const Color(0xFF171A1F),
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(12),
+              topRight: const Radius.circular(12),
+              bottomLeft: Radius.circular(isPlayer ? 12 : 3),
+              bottomRight: Radius.circular(isPlayer ? 3 : 12),
+            ),
+            border: Border.all(
               color: isPlayer
-                  ? AppTheme.brass.withValues(alpha: .10)
-                  : const Color(0xFF171A1F),
-              borderRadius: BorderRadius.only(
-                topLeft: const Radius.circular(16),
-                topRight: const Radius.circular(16),
-                bottomLeft: Radius.circular(isPlayer ? 16 : 4),
-                bottomRight: Radius.circular(isPlayer ? 4 : 16),
-              ),
-              border: Border.all(
-                color: isPlayer
-                    ? AppTheme.brass.withValues(alpha: .28)
-                    : const Color(0xFF30333A),
-              ),
+                  ? AppTheme.brass.withValues(alpha: .28)
+                  : const Color(0xFF30333A),
             ),
-            child: Column(
-              crossAxisAlignment:
-                  isPlayer ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-              children: [
-                Text(
-                  speaker,
-                  style: Theme.of(context).textTheme.labelMedium,
-                ),
-                const SizedBox(height: 4),
-                Text(item['content'] as String? ?? ''),
-              ],
-            ),
+          ),
+          child: Column(
+            crossAxisAlignment:
+                isPlayer ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            children: [
+              Text(
+                speaker,
+                style: Theme.of(context).textTheme.labelMedium,
+              ),
+              const SizedBox(height: 4),
+              Text(item['content'] as String? ?? ''),
+            ],
+          ),
+        );
+
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Row(
+            mainAxisAlignment:
+                isPlayer ? MainAxisAlignment.end : MainAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: isPlayer
+                ? [
+                    Flexible(child: bubble),
+                    const SizedBox(width: 8),
+                    PixelAvatar(
+                      name: avatarName,
+                      code: avatarCode,
+                      size: 38,
+                    ),
+                  ]
+                : [
+                    PixelAvatar(
+                      name: avatarName,
+                      code: avatarCode,
+                      size: 38,
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(child: bubble),
+                  ],
           ),
         );
       },
