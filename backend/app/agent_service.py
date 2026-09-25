@@ -153,6 +153,81 @@ class AgentService:
             logger.exception('OpenAI character response failed; using deterministic fallback')
             return self._fallback_reply(ctx)
 
+    async def generate_conversation_reply(
+        self,
+        ctx: ConversationReplyContext,
+    ) -> dict[str, Any]:
+        agent = ctx.agent
+        fallback = {
+            'reply': self._fallback_reply(agent),
+            'end_conversation': ctx.exchange_no >= ctx.max_exchanges,
+        }
+        if self.client is None:
+            return fallback
+
+        instructions = f'''
+{agent.world_prompt}
+
+{agent.system_prompt}
+
+당신은 '{agent.character_name}' 한 사람만 연기한다.
+목표: {agent.objective or '없음'}
+성격: {json.dumps(agent.personality, ensure_ascii=False)}
+비밀: {json.dumps(agent.secrets, ensure_ascii=False)}
+거짓말 정책: {json.dumps(agent.lie_policy, ensure_ascii=False)}
+현재 아는 사실: {json.dumps(agent.known_facts, ensure_ascii=False)}
+현재 오해: {json.dumps(agent.false_beliefs, ensure_ascii=False)}
+최근 기억: {json.dumps(agent.memories, ensure_ascii=False)}
+
+대화 규칙:
+- personality의 말투와 성격을 문장에 확실히 반영한다.
+- may_lie=true이면 목표나 비밀을 지키는 데 유리할 때 allowed_topics 범위에서 거짓 증언, 축소, 회피가 가능하다.
+- 거짓말 여부를 메타적으로 설명하지 않는다.
+- 존재하지 않는 인물/장소/물건/증거를 만들어내지 않는다.
+- 제시된 물건이 있으면 실제로 눈앞에서 본 것으로 취급하고 반응한다.
+- 답변은 한국어 1~3문장으로 짧게 한다.
+- 더 말할 이유가 없거나 불쾌/경계/목표상 대화를 끊는 것이 자연스러우면 end_conversation=true로 한다.
+- 현재 {ctx.exchange_no}/{ctx.max_exchanges}번째 왕복이다. 최대치를 넘길 수 없다.
+- 반드시 JSON 객체 하나만 출력한다.
+
+{
+  "reply": "캐릭터의 실제 발화",
+  "end_conversation": true
+}
+''' .strip()
+
+        payload = {
+            'history': ctx.history[-6:],
+            'presented_item': ctx.presented_item,
+            'latest_player_input': agent.question,
+        }
+        try:
+            response = await self.client.responses.create(
+                model=self.settings.openai_model,
+                instructions=instructions,
+                input=json.dumps(payload, ensure_ascii=False, default=str),
+                max_output_tokens=180,
+            )
+            raw = (response.output_text or '').strip()
+            if raw.startswith('```'):
+                raw = raw.split('\n', 1)[1] if '\n' in raw else raw
+                raw = raw.rsplit('```', 1)[0].strip()
+            start = raw.find('{')
+            end = raw.rfind('}')
+            if start >= 0 and end > start:
+                raw = raw[start:end + 1]
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                reply = str(parsed.get('reply') or '').strip()
+                if reply:
+                    return {
+                        'reply': reply,
+                        'end_conversation': bool(parsed.get('end_conversation'))
+                        or ctx.exchange_no >= ctx.max_exchanges,
+                    }
+        except (OpenAIError, json.JSONDecodeError, TypeError, ValueError):
+            logger.exception('OpenAI conversation response failed; using fallback')
+        return fallback
     async def interpret_game_action(self, ctx: GameMasterContext) -> dict[str, Any]:
         fallback = {
             'allowed': bool(ctx.action_text.strip()),
