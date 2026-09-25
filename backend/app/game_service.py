@@ -476,21 +476,19 @@ class GameService:
                 )
                 player_action_history = list(await cur.fetchall())
 
-                inventory_codes = [
-                    str(code) for code in _as_list(state.get('inventory_clues')) if str(code)
+                # Every discovered clue can be presented during a conversation.
+                # Physical "taken" items may still be tracked separately in
+                # public_state.inventory_clues for scene mutation, but the
+                # presentation UI should reflect the player's known evidence.
+                inventory_items: list[dict[str, Any]] = [
+                    {
+                        'clue_code': clue.get('clue_code'),
+                        'title': clue.get('title'),
+                        'content': clue.get('content'),
+                        'category': clue.get('category'),
+                    }
+                    for clue in clues
                 ]
-                inventory_items: list[dict[str, Any]] = []
-                if inventory_codes:
-                    await cur.execute(
-                        """
-                        select clue_code, title, content, category
-                        from public.session_clues
-                        where session_id = %s and clue_code = any(%s)
-                        order by discovered_at
-                        """,
-                        (session_id, inventory_codes),
-                    )
-                    inventory_items = list(await cur.fetchall())
 
                 known_locations = _as_dict(state.get('known_character_locations'))
                 character_dossiers: list[dict[str, Any]] = []
@@ -1393,9 +1391,8 @@ class GameService:
         self, cur, session, turn, state, request, client_action_id: str, conversation: dict[str, Any]
     ) -> bool:
         clue_code = str(request.payload.get('clue_code') or '').strip()
-        inventory = {str(code) for code in _as_list(state.get('inventory_clues'))}
-        if not clue_code or clue_code not in inventory:
-            raise HTTPException(status_code=400, detail='현재 가지고 있는 물건만 대화 중에 제시할 수 있습니다.')
+        if not clue_code:
+            raise HTTPException(status_code=400, detail='제시할 단서를 선택해 주세요.')
         await cur.execute(
             """
             select clue_code, title, content, category
@@ -1406,7 +1403,7 @@ class GameService:
         )
         clue = await cur.fetchone()
         if clue is None:
-            raise HTTPException(status_code=400, detail='제시할 물건을 찾을 수 없습니다.')
+            raise HTTPException(status_code=400, detail='아직 발견하지 않은 단서는 제시할 수 없습니다.')
 
         actor_id = str(conversation.get('actor_id') or '')
         actor_name = str(conversation.get('actor_name') or '인물')
