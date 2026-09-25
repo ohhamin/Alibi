@@ -512,6 +512,60 @@ class GameService:
                     'solution': solution,
                 }
 
+    async def advance_game(self, user_id: str, session_id: str) -> dict[str, Any]:
+        async with pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute(
+                        "select * from public.game_sessions where id = %s and user_id = %s for update",
+                        (session_id, user_id),
+                    )
+                    session = await cur.fetchone()
+                    if session is None:
+                        raise HTTPException(status_code=404, detail='게임 세션을 찾을 수 없습니다.')
+                    if session['status'] != 'active':
+                        return await self.get_session_state(user_id, session_id)
+
+                    await cur.execute(
+                        """
+                        select * from public.game_turns
+                        where session_id = %s and turn_no = %s and status = 'open'
+                        for update
+                        """,
+                        (session_id, session['current_turn']),
+                    )
+                    turn = await cur.fetchone()
+                    if turn is None:
+                        raise HTTPException(status_code=409, detail='현재 진행 가능한 턴이 없습니다.')
+
+                    state = deepcopy(_as_dict(session['public_state']))
+                    await self._ensure_turn_order(cur, session, state)
+                    if _as_dict(state.get('active_conversation')) or _as_dict(state.get('pending_npc_question')):
+                        return await self.get_session_state(user_id, session_id)
+                    if str(state.get('current_actor_id') or '') == str(session['player_character_id']):
+                        return await self.get_session_state(user_id, session_id)
+
+                    await self._advance_turn_sequence(cur, session, turn, state)
+
+                    await cur.execute(
+                        """
+                        update public.game_sessions
+                        set public_state = %s, current_turn = %s, current_phase = %s,
+                            last_saved_at = now(), updated_at = now()
+                        where id = %s
+                        """,
+                        (Jsonb(state), session['current_turn'], session['current_phase'], session_id),
+                    )
+                    await cur.execute(
+                        """
+                        update game_private.session_runtime
+                        set current_scene = %s, state = %s, state_version = state_version + 1, updated_at = now()
+                        where session_id = %s
+                        """,
+                        (state.get('current_location'), Jsonb(state), session_id),
+                    )
+
+        return await self.get_session_state(user_id, session_id)
     async def perform_action(self, user_id: str, session_id: str, request: ActionRequest) -> dict[str, Any]:
         client_action_id = str(request.client_action_id or uuid4())
         async with pool.connection() as conn:
