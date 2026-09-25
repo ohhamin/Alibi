@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../core/api_client.dart';
-import '../core/app_assets.dart';
 import '../core/app_theme.dart';
 import '../widgets/pixel_avatar.dart';
+import '../widgets/pixel_story_art.dart';
 
 class GameScreen extends StatefulWidget {
   const GameScreen({super.key, required this.initialState});
@@ -1510,8 +1510,6 @@ class _SceneCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final imageAsset = AppAssets.locationForCode(locationCode);
-
     return Card(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
       clipBehavior: Clip.antiAlias,
@@ -1520,21 +1518,11 @@ class _SceneCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (imageAsset != null) ...[
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: AspectRatio(
-                  aspectRatio: 4 / 3,
-                  child: Image.asset(
-                    imageAsset,
-                    fit: BoxFit.cover,
-                    filterQuality: FilterQuality.none,
-                    errorBuilder: (_, _, _) => const SizedBox.shrink(),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
+            PixelLocationArt(
+              locationCode: locationCode,
+              height: 190,
+            ),
+            const SizedBox(height: 12),
             Row(
               children: [
                 const Icon(Icons.room_outlined),
@@ -1978,29 +1966,9 @@ class _EvidenceThumb extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final asset = AppAssets.evidenceForCode(clueCode);
-    if (asset == null) {
-      return SizedBox(
-        width: size,
-        height: size,
-        child: const Icon(Icons.inventory_2_outlined),
-      );
-    }
-
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(7),
-      child: Container(
-        width: size,
-        height: size,
-        color: const Color(0xFF0E1013),
-        child: Image.asset(
-          asset,
-          fit: BoxFit.cover,
-          filterQuality: FilterQuality.none,
-          errorBuilder: (_, _, _) =>
-              const Icon(Icons.inventory_2_outlined),
-        ),
-      ),
+    return PixelEvidenceArt(
+      clueCode: clueCode,
+      size: size,
     );
   }
 }
