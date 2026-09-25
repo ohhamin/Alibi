@@ -2,7 +2,14 @@ class AppAssets {
   AppAssets._();
 
   static const loading = 'assets/images/ui/loading.webp';
+  static const appIcon = 'assets/images/ui/app_icon.webp';
 
+  static const characterSheet = 'assets/images/sheets/characters_sheet.webp';
+  static const locationSheet = 'assets/images/sheets/locations_sheet.webp';
+  static const evidenceSheet = 'assets/images/sheets/evidence_sheet.webp';
+
+  // Kept for compatibility with older story/UI code that may still request
+  // individual files. New in-game rendering uses the high-resolution sheets.
   static const Map<String, String> _locationAssets = {
     'hall': 'assets/images/locations/bookstore_hall.webp',
     'cafe': 'assets/images/locations/cafe.webp',
