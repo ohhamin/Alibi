@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'core/app_config.dart';
+import 'core/app_theme.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 
@@ -19,23 +20,10 @@ class AlibiApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = ColorScheme.fromSeed(
-      seedColor: const Color(0xFFB39DDB),
-      brightness: Brightness.dark,
-      surface: const Color(0xFF15131A),
-    );
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'ALIBI',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: scheme,
-        scaffoldBackgroundColor: const Color(0xFF0E0D11),
-        cardTheme: const CardThemeData(
-          margin: EdgeInsets.zero,
-          elevation: 0,
-        ),
-      ),
+      theme: AppTheme.dark,
       home: const AuthGate(),
     );
   }
@@ -59,8 +47,17 @@ class _AuthGateState extends State<AuthGate> {
 
   @override
   Widget build(BuildContext context) {
-    return Supabase.instance.client.auth.currentSession == null
-        ? const LoginScreen()
-        : const HomeScreen();
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 320),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: child,
+      ),
+      child: Supabase.instance.client.auth.currentSession == null
+          ? const LoginScreen(key: ValueKey('login'))
+          : const HomeScreen(key: ValueKey('home')),
+    );
   }
 }
