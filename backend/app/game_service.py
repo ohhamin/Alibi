@@ -2251,6 +2251,7 @@ class GameService:
             target_ctx = await self._agent_context_for_character(
                 cur, session, suspect_id, question
             )
+            target_ctx.player_name = detective['display_name']
             reply = await self.agent_service.generate_reply(target_ctx)
             await self._remember(
                 cur,
