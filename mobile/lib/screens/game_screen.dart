@@ -1172,15 +1172,13 @@ class _GameScreenState extends State<GameScreen> {
                                         maxLines: 3,
                                         overflow: TextOverflow.ellipsis,
                                       ),
-                                      trailing: Radio<String>(
-                                        value: '${item['clue_code']}',
-                                        groupValue:
-                                            '${selected?['clue_code'] ?? ''}',
-                                        onChanged: (_) {
-                                          setSheetState(
-                                            () => selected = item,
-                                          );
-                                        },
+                                      trailing: Icon(
+                                        isSelected
+                                            ? Icons.radio_button_checked
+                                            : Icons.radio_button_unchecked,
+                                        color: isSelected
+                                            ? AppTheme.brass
+                                            : null,
                                       ),
                                       onTap: () {
                                         setSheetState(
