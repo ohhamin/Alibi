@@ -492,6 +492,65 @@ class GameService:
                     )
                     inventory_items = list(await cur.fetchall())
 
+                known_locations = _as_dict(state.get('known_character_locations'))
+                character_dossiers: list[dict[str, Any]] = []
+                for character in characters:
+                    character_id = str(character['id'])
+                    known_location = _as_dict(known_locations.get(character_id))
+                    known_location_code = str(
+                        known_location.get('location_code') or ''
+                    )
+                    known_location_name = next(
+                        (
+                            str(location['name'])
+                            for location in locations
+                            if str(location['location_code']) == known_location_code
+                        ),
+                        '',
+                    )
+
+                    known_statements: list[str] = []
+                    for message in messages:
+                        if (
+                            str(message.get('speaker_character_id') or '') != character_id
+                            or str(message.get('speaker_type') or '') != 'character'
+                        ):
+                            continue
+                        statement = str(message.get('content') or '').strip()
+                        if statement and statement not in known_statements:
+                            known_statements.append(statement)
+
+                    related_clues: list[dict[str, Any]] = []
+                    character_name = str(character['display_name'])
+                    for clue in clues:
+                        clue_title = str(clue.get('title') or '')
+                        clue_content = str(clue.get('content') or '')
+                        if character_name not in clue_title and character_name not in clue_content:
+                            continue
+                        related_clues.append(
+                            {
+                                'clue_code': clue.get('clue_code'),
+                                'title': clue_title,
+                                'content': clue_content,
+                            }
+                        )
+
+                    character_dossiers.append(
+                        {
+                            'id': character_id,
+                            'code': character['code'],
+                            'display_name': character['display_name'],
+                            'role_label': character['role_label'],
+                            'public_bio': character['public_bio'],
+                            'avatar_url': character['avatar_url'],
+                            'is_player': character_id == str(session['player_character_id']),
+                            'known_location_code': known_location_code or None,
+                            'known_location_name': known_location_name or None,
+                            'known_statements': known_statements[-8:],
+                            'related_clues': related_clues,
+                        }
+                    )
+
                 return {
                     'session': session,
                     'current_turn': turn,
@@ -503,6 +562,7 @@ class GameService:
                     'current_location_detail': current_location_detail,
                     'visible_characters': visible_characters,
                     'character_locations': character_locations,
+                    'character_dossiers': character_dossiers,
                     'known_character_locations': _as_dict(state.get('known_character_locations')),
                     'pending_npc_question': state.get('pending_npc_question'),
                     'active_conversation': state.get('active_conversation'),
