@@ -132,7 +132,7 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (context) => AlertDialog(
         title: const Text('수사 기록 폐기'),
         content: Text(
-          "'$storyTitle'${playerName.isEmpty ? '' : ' · $playerName'} 저장 데이터를 삭제할까요?\n삭제한 데이터는 복구할 수 없습니다.",
+          "'$storyTitle'${playerName.isEmpty ? '' : ' · $playerName'} 수사 기록을 폐기할까요?\n폐기한 기록은 복구할 수 없습니다.",
         ),
         actions: [
           TextButton(
@@ -194,7 +194,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 : ListView(
                     padding: const EdgeInsets.fromLTRB(18, 8, 18, 40),
                     children: [
-                      if (_sessions.isNotEmpty) ...[
+                      if (_sessions.any((s) => s['status'] == 'active')) ...[
                         Text('진행 중인 수사', style: Theme.of(context).textTheme.titleLarge),
                         const SizedBox(height: 10),
                         ..._sessions.where((s) => s['status'] == 'active').map(
