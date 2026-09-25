@@ -1456,7 +1456,10 @@ class _GameScreenState extends State<GameScreen> {
                           onPressed: _busy
                               ? null
                               : () {
-                                  _conversationMinimized = true;
+                                  setState(() {
+                                    _conversationMinimized = true;
+                                    _conversationSheetOpen = false;
+                                  });
                                   Navigator.pop(sheetContext);
                                 },
                           icon: const Icon(Icons.keyboard_arrow_down),
@@ -1808,9 +1811,8 @@ class _GameScreenState extends State<GameScreen> {
                 trailing: TextButton(
                   onPressed: _busy
                       ? null
-                      : () {
-                          setState(() => _conversationMinimized = false);
-                          _openConversationSheet();
+                      : () async {
+                          await _openConversationSheet();
                         },
                   child: const Text('대화로 돌아가기'),
                 ),
