@@ -2079,8 +2079,14 @@ class _MessageTimeline extends StatelessWidget {
       return const Center(child: Text('사건 기록을 불러오는 중입니다.'));
     }
 
+    final bottomSafeArea = MediaQuery.viewPaddingOf(context).bottom;
     return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(14, 4, 14, 18),
+      padding: EdgeInsets.fromLTRB(
+        14,
+        4,
+        14,
+        bottomSafeArea + 72,
+      ),
       itemCount: messages.length,
       itemBuilder: (context, index) {
         final item = messages[index];
