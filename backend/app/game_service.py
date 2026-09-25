@@ -235,73 +235,11 @@ class GameService:
                         ),
                     )
 
-                    await cur.execute(
-                        """
-                        with suspects as (
-                          select sc.id, row_number() over (order by sc.sort_order) as suspect_no
-                          from public.story_characters sc
-                          where sc.story_version_id = %s
-                            and sc.is_player_selectable = true
-                        ),
-                        random_clues as (
-                          select q.code, row_number() over () as clue_no
-                          from (
-                            select c.code
-                            from game_private.story_clues c
-                            where c.story_version_id = %s
-                            order by random()
-                            limit (select count(*) * 3 from suspects)
-                          ) q
-                        )
-                        insert into game_private.session_evidence_holdings
-                          (session_id, clue_code, holder_character_id, acquired_round, acquisition_type, status)
-                        select
-                          %s,
-                          rc.code,
-                          s.id,
-                          1,
-                          'initial',
-                          'held'
-                        from suspects s
-                        join random_clues rc
-                          on rc.clue_no between ((s.suspect_no - 1) * 3 + 1) and (s.suspect_no * 3)
-                        on conflict (session_id, clue_code) do nothing
-                        """,
-                        (
-                            str(request.story_version_id),
-                            str(request.story_version_id),
-                            session_id,
-                        ),
-                    )
-                    await cur.execute(
-                        """
-                        insert into game_private.agent_memories
-                          (session_id, character_id, turn_id, memory_type, content,
-                           source_key, salience, confidence, is_secret)
-                        select
-                          h.session_id,
-                          h.holder_character_id,
-                          %s,
-                          'private_evidence',
-                          '게임 시작 시 비공개로 받은 증거: ' ||
-                            c.player_title || ' - ' || c.player_text,
-                          'initial-private-evidence:' || h.clue_code,
-                          90,
-                          1.0,
-                          true
-                        from game_private.session_evidence_holdings h
-                        join game_private.story_clues c
-                          on c.story_version_id = %s
-                         and c.code = h.clue_code
-                        where h.session_id = %s
-                          and h.acquisition_type = 'initial'
-                        on conflict do nothing
-                        """,
-                        (
-                            turn_id,
-                            str(request.story_version_id),
-                            session_id,
-                        ),
+                    await self._ensure_initial_evidence_holdings(
+                        cur,
+                        session_id,
+                        str(request.story_version_id),
+                        turn_id=turn_id,
                     )
                     await self._sync_player_inventory_state(
                         cur,
@@ -400,6 +338,132 @@ class GameService:
 
         return await self.get_session_state(user_id, str(session_id))
 
+    async def _ensure_initial_evidence_holdings(
+        self,
+        cur,
+        session_id: str,
+        story_version_id: str,
+        *,
+        turn_id=None,
+    ) -> None:
+        if turn_id is None:
+            await cur.execute(
+                """
+                select id
+                from public.game_turns
+                where session_id = %s
+                order by turn_no desc
+                limit 1
+                """,
+                (session_id,),
+            )
+            turn_row = await cur.fetchone()
+            turn_id = turn_row['id'] if turn_row else None
+
+        await cur.execute(
+            """
+            with suspects as (
+              select
+                sc.id as character_id,
+                sc.sort_order,
+                greatest(
+                  0,
+                  3 - count(h.clue_code) filter (
+                    where h.acquisition_type = 'initial'
+                  )
+                )::int as missing_count
+              from public.story_characters sc
+              left join game_private.session_evidence_holdings h
+                on h.session_id = %s
+               and h.holder_character_id = sc.id
+              where sc.story_version_id = %s
+                and sc.is_player_selectable = true
+              group by sc.id, sc.sort_order
+            ),
+            slots as (
+              select
+                s.character_id,
+                row_number() over (order by s.sort_order, g.n) as slot_no
+              from suspects s
+              cross join lateral generate_series(1, s.missing_count) g(n)
+            ),
+            available as (
+              select
+                c.code,
+                row_number() over (order by random()) as slot_no
+              from game_private.story_clues c
+              where c.story_version_id = %s
+                and not exists (
+                  select 1
+                  from game_private.session_evidence_holdings h
+                  where h.session_id = %s
+                    and h.clue_code = c.code
+                )
+                and not exists (
+                  select 1
+                  from public.session_clues pc
+                  where pc.session_id = %s
+                    and pc.clue_code = c.code
+                )
+            )
+            insert into game_private.session_evidence_holdings
+              (session_id, clue_code, holder_character_id, acquired_round,
+               acquisition_type, status)
+            select
+              %s,
+              a.code,
+              s.character_id,
+              1,
+              'initial',
+              'held'
+            from slots s
+            join available a on a.slot_no = s.slot_no
+            on conflict (session_id, clue_code) do nothing
+            """,
+            (
+                session_id,
+                story_version_id,
+                story_version_id,
+                session_id,
+                session_id,
+                session_id,
+            ),
+        )
+
+        if turn_id is not None:
+            await cur.execute(
+                """
+                insert into game_private.agent_memories
+                  (session_id, character_id, turn_id, memory_type, content,
+                   source_key, salience, confidence, is_secret)
+                select
+                  h.session_id,
+                  h.holder_character_id,
+                  %s,
+                  'private_evidence',
+                  '게임 시작 시 비공개로 받은 증거: ' ||
+                    c.player_title || ' - ' || c.player_text,
+                  'initial-private-evidence:' || h.clue_code,
+                  90,
+                  1.0,
+                  true
+                from game_private.session_evidence_holdings h
+                join game_private.story_clues c
+                  on c.story_version_id = %s
+                 and c.code = h.clue_code
+                where h.session_id = %s
+                  and h.acquisition_type = 'initial'
+                  and not exists (
+                    select 1
+                    from game_private.agent_memories am
+                    where am.session_id = h.session_id
+                      and am.character_id = h.holder_character_id
+                      and am.source_key = 'initial-private-evidence:' || h.clue_code
+                  )
+                """,
+                (turn_id, story_version_id, session_id),
+            )
+
     async def get_session_state(self, user_id: str, session_id: str) -> dict[str, Any]:
         async with pool.connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cur:
@@ -416,6 +480,12 @@ class GameService:
                 session = await cur.fetchone()
                 if session is None:
                     raise HTTPException(status_code=404, detail='게임 세션을 찾을 수 없습니다.')
+
+                await self._ensure_initial_evidence_holdings(
+                    cur,
+                    str(session['id']),
+                    str(session['story_version_id']),
+                )
 
                 await cur.execute(
                     """
@@ -2820,7 +2890,15 @@ class GameService:
                     )
                     return
                 await self._npc_talk(
-                    cur, session, turn, state, actor, target, current_code, intent
+                    cur,
+                    session,
+                    turn,
+                    state,
+                    actor,
+                    target,
+                    current_code,
+                    intent,
+                    question=str(choice.get('question') or '').strip() or None,
                 )
                 return
             action_type = 'observe'
@@ -3133,6 +3211,7 @@ class GameService:
         target,
         location_code: str,
         intent: str,
+        question: str | None = None,
     ) -> None:
         target_id = str(target['id'])
         await cur.execute(
@@ -3169,10 +3248,9 @@ class GameService:
         target_memories = [row['content'] for row in await cur.fetchall()]
         target_memories.reverse()
 
-        question = (
-            f"{intent} "
-            "사건과 관련해서 네가 직접 본 것, 들은 것, 기억하는 동선을 말해 줘. "
-            "확실하지 않은 것은 확실한 척하지 마."
+        actual_question = (
+            question
+            or f"{intent} 아까 제 동선이나 제가 여기 있었던 걸 기억하는 게 있나요?"
         )
         reply = await self.agent_service.generate_reply(
             AgentContext(
@@ -3190,13 +3268,13 @@ class GameService:
                 memory_summary=target_ctx['memory_summary'],
                 memories=target_memories,
                 player_name=actor['display_name'],
-                question=question,
+                question=actual_question,
             )
         )
 
         exchange = (
-            f"{actor['display_name']}이(가) {target_ctx['display_name']}에게 사건에 대해 물었고, "
-            f"{target_ctx['display_name']}은(는) '{reply}'라고 답했다."
+            f"{actor['display_name']}: '{actual_question}' "
+            f"{target_ctx['display_name']}: '{reply}'"
         )
         await self._insert_internal_event(
             cur,
