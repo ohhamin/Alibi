@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../core/app_theme.dart';
-
 class PixelAvatar extends StatelessWidget {
   const PixelAvatar({
     super.key,
