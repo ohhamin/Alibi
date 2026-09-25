@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../core/api_client.dart';
+import '../core/app_theme.dart';
 import '../models/story.dart';
 import 'game_screen.dart';
 
@@ -60,9 +61,17 @@ class _HomeScreenState extends State<HomeScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('누구의 알리바이로 시작할까?', style: Theme.of(context).textTheme.titleLarge),
+              const Row(
+                children: [
+                  Icon(Icons.badge_outlined, size: 18, color: AppTheme.brass),
+                  SizedBox(width: 8),
+                  Text('PLAYER FILE', style: TextStyle(color: AppTheme.brass, fontSize: 10, fontWeight: FontWeight.w900, letterSpacing: 1.4)),
+                ],
+              ),
               const SizedBox(height: 8),
-              const Text('선택한 인물의 비밀과 목표를 알고 플레이합니다.'),
+              Text('누구의 알리바이로 시작할까?', style: Theme.of(context).textTheme.headlineSmall),
+              const SizedBox(height: 8),
+              Text('선택한 인물의 실제 행적과 비밀을 알고 플레이합니다. 다른 인물의 진실은 직접 밝혀내야 합니다.', style: Theme.of(context).textTheme.bodySmall),
               const SizedBox(height: 16),
               ...choices.map(
                 (c) => Card(
@@ -121,18 +130,18 @@ class _HomeScreenState extends State<HomeScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('저장 게임 삭제'),
+        title: const Text('수사 기록 폐기'),
         content: Text(
           "'$storyTitle'${playerName.isEmpty ? '' : ' · $playerName'} 저장 데이터를 삭제할까요?\n삭제한 데이터는 복구할 수 없습니다.",
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('취소'),
+            child: const Text('보관'),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('삭제'),
+            child: const Text('폐기'),
           ),
         ],
       ),
@@ -143,7 +152,7 @@ class _HomeScreenState extends State<HomeScreen> {
       await _api.delete('/sessions/${session['id']}');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('저장 게임을 삭제했습니다.')),
+        const SnackBar(content: Text('수사 기록을 폐기했습니다.')),
       );
       await _load();
     } catch (e) {
@@ -157,7 +166,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('ALIBI'),
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('ALIBI / INVESTIGATION DESK', style: TextStyle(color: AppTheme.muted, fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 1.4)),
+            SizedBox(height: 2),
+            Text('사건 기록실'),
+          ],
+        ),
         actions: [
           IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
           IconButton(
@@ -179,21 +195,21 @@ class _HomeScreenState extends State<HomeScreen> {
                     padding: const EdgeInsets.fromLTRB(18, 8, 18, 40),
                     children: [
                       if (_sessions.isNotEmpty) ...[
-                        Text('이어하기', style: Theme.of(context).textTheme.titleLarge),
+                        Text('진행 중인 수사', style: Theme.of(context).textTheme.titleLarge),
                         const SizedBox(height: 10),
                         ..._sessions.where((s) => s['status'] == 'active').map(
                               (s) => Padding(
                                 padding: const EdgeInsets.only(bottom: 10),
                                 child: Card(
                                   child: ListTile(
-                                    leading: const Icon(Icons.history),
+                                    leading: const Icon(Icons.manage_search, color: AppTheme.brass),
                                     title: Text(s['story_title'] as String? ?? ''),
                                     subtitle: Text('${s['player_name'] ?? ''} · 라운드 ${s['current_turn']}'),
                                     trailing: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
                                         IconButton(
-                                          tooltip: '저장 게임 삭제',
+                                          tooltip: '수사 기록 폐기',
                                           onPressed: () => _deleteSession(s),
                                           icon: const Icon(Icons.delete_outline),
                                         ),
@@ -208,18 +224,18 @@ class _HomeScreenState extends State<HomeScreen> {
                         const SizedBox(height: 24),
                       ],
                       if (_sessions.any((s) => s['status'] != 'active')) ...[
-                        Text('지난 기록', style: Theme.of(context).textTheme.titleLarge),
+                        Text('종결된 기록', style: Theme.of(context).textTheme.titleLarge),
                         const SizedBox(height: 10),
                         ..._sessions.where((s) => s['status'] != 'active').map(
                               (s) => Padding(
                                 padding: const EdgeInsets.only(bottom: 10),
                                 child: Card(
                                   child: ListTile(
-                                    leading: const Icon(Icons.task_alt),
+                                    leading: const Icon(Icons.inventory_2_outlined),
                                     title: Text(s['story_title'] as String? ?? ''),
                                     subtitle: Text('${s['player_name'] ?? ''} · 라운드 ${s['current_turn']} · 종료'),
                                     trailing: IconButton(
-                                      tooltip: '저장 게임 삭제',
+                                      tooltip: '수사 기록 폐기',
                                       onPressed: () => _deleteSession(s),
                                       icon: const Icon(Icons.delete_outline),
                                     ),
@@ -229,12 +245,13 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                         const SizedBox(height: 24),
                       ],
-                      Text('사건 파일', style: Theme.of(context).textTheme.titleLarge),
+                      Text('사건 보관함', style: Theme.of(context).textTheme.titleLarge),
                       const SizedBox(height: 10),
                       ..._stories.map(
                         (story) => Padding(
                           padding: const EdgeInsets.only(bottom: 14),
                           child: Card(
+                            clipBehavior: Clip.antiAlias,
                             child: InkWell(
                               borderRadius: BorderRadius.circular(12),
                               onTap: () => _start(story),
