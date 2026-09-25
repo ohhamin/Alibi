@@ -63,7 +63,7 @@ class _SplashGateState extends State<SplashGate> {
                 child: Image.asset(
                   AppAssets.loading,
                   fit: BoxFit.cover,
-                  filterQuality: FilterQuality.none,
+                  filterQuality: FilterQuality.high,
                   errorBuilder: (_, _, _) => const Center(
                     child: Text(
                       'ALIBI',
