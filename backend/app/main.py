@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from psycopg.types.json import Jsonb
 
 from .agent_service import AgentService
 from .auth import AuthUser, get_current_user
@@ -15,6 +16,75 @@ class InterrogationEvidenceGameService(GameService):
     """Only force evidence disclosure immediately before detective interrogations."""
 
     mandatory_submission_rounds = {2, 5}
+
+    async def _clear_stale_submission(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> None:
+        """Release old round-end prompts created by the previous rule set."""
+        async with pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        select current_turn, public_state
+                        from public.game_sessions
+                        where id = %s and user_id = %s and status = 'active'
+                        """,
+                        (session_id, user_id),
+                    )
+                    row = await cur.fetchone()
+                    if row is None:
+                        return
+
+                    current_round = int(row[0])
+                    state = row[1] if isinstance(row[1], dict) else {}
+                    pending = state.get('pending_evidence_submission')
+                    if (
+                        current_round in self.mandatory_submission_rounds
+                        or not isinstance(pending, dict)
+                        or not pending
+                    ):
+                        return
+
+                    state = dict(state)
+                    state['pending_evidence_submission'] = None
+                    state['round_submission_done_round'] = current_round
+                    await cur.execute(
+                        """
+                        update public.game_sessions
+                        set public_state = %s, last_saved_at = now(), updated_at = now()
+                        where id = %s and user_id = %s
+                        """,
+                        (Jsonb(state), session_id, user_id),
+                    )
+                    await cur.execute(
+                        """
+                        update game_private.session_runtime
+                        set state = %s, state_version = state_version + 1,
+                            updated_at = now()
+                        where session_id = %s
+                        """,
+                        (Jsonb(state), session_id),
+                    )
+
+    async def get_session_state(self, user_id: str, session_id: str):
+        await self._clear_stale_submission(user_id, session_id)
+        return await super().get_session_state(user_id, session_id)
+
+    async def advance_game(self, user_id: str, session_id: str):
+        await self._clear_stale_submission(user_id, session_id)
+        return await super().advance_game(user_id, session_id)
+
+    async def perform_action(
+        self,
+        user_id: str,
+        session_id: str,
+        request: ActionRequest,
+    ):
+        await self._clear_stale_submission(user_id, session_id)
+        return await super().perform_action(user_id, session_id, request)
 
     async def start_session(
         self,
