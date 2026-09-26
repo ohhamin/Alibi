@@ -97,34 +97,56 @@ class EnhancedGameService(GameService):
             state['round_submission_done_round'] = current_round
             changed = True
 
-        async with pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor(row_factory=dict_row) as cur:
-                    before = deepcopy(_as_dict(state.get('social_state')))
-                    await self._ensure_social_state(
-                        cur,
-                        session['story_version_id'],
-                        state,
-                    )
-                    if before != _as_dict(state.get('social_state')):
-                        changed = True
-                    if changed:
-                        await cur.execute(
-                            """
-                            update public.game_sessions
-                            set public_state = %s, updated_at = now()
-                            where id = %s and user_id = %s
-                            """,
-                            (Jsonb(state), session_id, user_id),
-                        )
-                        await cur.execute(
-                            """
-                            update game_private.session_runtime
-                            set state = %s, state_version = state_version + 1, updated_at = now()
-                            where session_id = %s
-                            """,
-                            (Jsonb(state), session_id),
-                        )
+        social = _as_dict(state.get('social_state'))
+        turn_rows = [_as_dict(item) for item in _as_list(state.get('turn_order'))]
+        suspect_ids = [
+            str(item.get('id') or '')
+            for item in turn_rows
+            if str(item.get('id') or '') and str(item.get('role') or '') != '탐정'
+        ]
+        needs_social_repair = (
+            not suspect_ids
+            or any(
+                actor_id not in social
+                or any(
+                    target_id != actor_id
+                    and target_id not in _as_dict(social.get(actor_id))
+                    for target_id in suspect_ids
+                )
+                for actor_id in suspect_ids
+            )
+        )
+
+        if needs_social_repair or changed:
+            async with pool.connection() as conn:
+                async with conn.transaction():
+                    async with conn.cursor(row_factory=dict_row) as cur:
+                        if needs_social_repair:
+                            before = deepcopy(_as_dict(state.get('social_state')))
+                            await self._ensure_social_state(
+                                cur,
+                                session['story_version_id'],
+                                state,
+                            )
+                            if before != _as_dict(state.get('social_state')):
+                                changed = True
+                        if changed:
+                            await cur.execute(
+                                """
+                                update public.game_sessions
+                                set public_state = %s, updated_at = now()
+                                where id = %s and user_id = %s
+                                """,
+                                (Jsonb(state), session_id, user_id),
+                            )
+                            await cur.execute(
+                                """
+                                update game_private.session_runtime
+                                set state = %s, state_version = state_version + 1, updated_at = now()
+                                where session_id = %s
+                                """,
+                                (Jsonb(state), session_id),
+                            )
 
         session['public_state'] = state
         result['social_state'] = _as_dict(state.get('social_state'))

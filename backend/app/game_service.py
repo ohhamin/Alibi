@@ -2421,6 +2421,7 @@ class GameService:
             "가능하면 구체적인 시간과 함께 설명해 주세요."
         )
 
+        pending_interrogations: list[tuple[dict[str, Any], str, str, str, AgentContext]] = []
         for suspect in suspects:
             suspect_id = str(suspect['id'])
             if suspect_id == player_id:
@@ -2450,32 +2451,47 @@ class GameService:
                 cur, session, suspect_id, compact_question
             )
             target_ctx.player_name = detective['display_name']
-            reply = await self.agent_service.generate_reply(target_ctx)
-            transcript = (
-                f"{suspect['display_name']} 비공개 취조\n"
-                f"탐정: {compact_question}\n"
-                f"{suspect['display_name']}: {reply}"
+            pending_interrogations.append(
+                (suspect, suspect_id, source_key, compact_question, target_ctx)
             )
-            await self._remember(
-                cur,
-                session['id'],
-                detective['id'],
-                turn['id'],
-                'private_interrogation',
-                transcript,
-                source_key,
-                salience=100,
+
+        if pending_interrogations:
+            replies = await asyncio.gather(
+                *(
+                    self.agent_service.generate_reply(item[4])
+                    for item in pending_interrogations
+                ),
+                return_exceptions=True,
             )
-            await self._remember(
-                cur,
-                session['id'],
-                suspect_id,
-                turn['id'],
-                'private_interrogation',
-                transcript,
-                f"private-interrogation-self:{current_round}:{suspect_id}",
-                salience=80,
-            )
+            for item, reply in zip(pending_interrogations, replies):
+                suspect, suspect_id, source_key, compact_question, _ = item
+                if isinstance(reply, BaseException):
+                    reply = '지금 기억나는 범위에서 말씀드리겠습니다.'
+                transcript = (
+                    f"{suspect['display_name']} 비공개 취조\n"
+                    f"탐정: {compact_question}\n"
+                    f"{suspect['display_name']}: {reply}"
+                )
+                await self._remember(
+                    cur,
+                    session['id'],
+                    detective['id'],
+                    turn['id'],
+                    'private_interrogation',
+                    transcript,
+                    source_key,
+                    salience=100,
+                )
+                await self._remember(
+                    cur,
+                    session['id'],
+                    suspect_id,
+                    turn['id'],
+                    'private_interrogation',
+                    transcript,
+                    f"private-interrogation-self:{current_round}:{suspect_id}",
+                    salience=80,
+                )
 
         if player_id:
             await self._insert_message(
