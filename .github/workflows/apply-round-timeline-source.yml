@@ -1,0 +1,38 @@
+name: Apply round timeline source patch
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'mobile/tool/apply_round_timeline_patch.py'
+      - '.github/workflows/apply-round-timeline-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch round-grouped timeline
+        run: |
+          python mobile/tool/apply_round_timeline_patch.py
+          git diff --check
+
+      - name: Commit patched source
+        run: |
+          if git diff --quiet -- mobile/lib/screens/game_screen.dart; then
+            echo 'No source changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mobile/lib/screens/game_screen.dart
+          git commit -m 'Group game status timeline by round'
+          git push origin HEAD:master
