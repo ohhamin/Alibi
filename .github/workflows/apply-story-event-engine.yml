@@ -1,0 +1,44 @@
+name: Apply conditional story event engine
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'backend/app/story_events.py'
+      - 'backend/tool/apply_story_event_engine.py'
+      - '.github/workflows/apply-story-event-engine.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Patch source
+        run: |
+          python backend/tool/apply_story_event_engine.py
+          git diff --check
+          python -m compileall -q backend/app
+
+      - name: Commit patched source
+        run: |
+          if git diff --quiet -- backend/app/enhanced_game_service.py; then
+            echo 'No source changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add backend/app/enhanced_game_service.py
+          git commit -m 'Run data-driven conditional story events'
+          git push origin HEAD:master
