@@ -106,7 +106,9 @@ class AgentService:
     def enabled(self) -> bool:
         return self.client is not None
 
-    async def generate_reply(self, ctx: AgentContext) -> str:
+    async def generate_reply(
+        self, ctx: AgentContext, *, max_output_tokens: int = 180
+    ) -> str:
         if self.client is None:
             return self._fallback_reply(ctx)
 
@@ -148,7 +150,7 @@ class AgentService:
                 model=self.settings.openai_model,
                 instructions=instructions,
                 input=f"{ctx.player_name}: {ctx.question}",
-                max_output_tokens=min(self.settings.openai_max_output_tokens, 180),
+                max_output_tokens=min(self.settings.openai_max_output_tokens, max_output_tokens),
             )
             text = (response.output_text or '').strip()
             return text or self._fallback_reply(ctx)
@@ -421,11 +423,13 @@ JSON 형식:
             return await self._json_response(instructions, serialized, fallback)
         try:
             return await asyncio.wait_for(
-                self._json_response(instructions, serialized, fallback),
-                timeout=5.0,
+                self._json_response(
+                    instructions, serialized, fallback, max_output_tokens=140
+                ),
+                timeout=4.0,
             )
         except TimeoutError:
-            logger.warning('NPC action selection exceeded 5.0s; using fallback')
+            logger.warning('NPC action selection exceeded 4.0s; using fallback')
             return fallback
 
     async def choose_detective_bonus_action(self, ctx: DetectiveBonusContext) -> dict[str, Any]:
@@ -511,6 +515,7 @@ reasoning에는 지목에 영향을 준 구체적인 단서·시간·진술을 �
         instructions: str,
         input_text: str,
         fallback: dict[str, Any],
+        max_output_tokens: int = 280,
     ) -> dict[str, Any]:
         if self.client is None:
             return fallback

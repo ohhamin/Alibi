@@ -3523,8 +3523,10 @@ class GameService:
         if witnessed_by_player:
             try:
                 reply = await asyncio.wait_for(
-                    self.agent_service.generate_reply(target_agent_ctx),
-                    timeout=3.5,
+                    self.agent_service.generate_reply(
+                        target_agent_ctx, max_output_tokens=90
+                    ),
+                    timeout=2.8,
                 )
             except TimeoutError:
                 reply = self.agent_service._fallback_reply(target_agent_ctx)
