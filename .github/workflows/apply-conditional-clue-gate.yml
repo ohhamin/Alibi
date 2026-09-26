@@ -1,0 +1,50 @@
+name: Apply conditional clue gates
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'backend/tool/apply_conditional_clue_gate.py'
+      - '.github/workflows/apply-conditional-clue-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://user:pass@localhost:5432/postgres
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Patch source and test
+        run: |
+          python backend/tool/apply_conditional_clue_gate.py
+          git diff --check
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+          python -m compileall -q app tests
+          pytest -q
+
+      - name: Commit patched source
+        run: |
+          if git diff --quiet -- backend/app/game_service.py; then
+            echo 'No source changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add backend/app/game_service.py
+          git commit -m 'Gate clues behind scripted story events'
+          git push origin HEAD:master
