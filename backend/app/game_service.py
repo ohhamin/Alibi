@@ -2952,7 +2952,13 @@ class GameService:
             )
             if player_location in {origin_code, move_to}:
                 await self._insert_message(
-                    cur, session['id'], turn['id'], 'narrator', None, 'narration', exact_move
+                    cur,
+                    session['id'],
+                    turn['id'],
+                    'character',
+                    actor['id'],
+                    'npc_action',
+                    exact_move,
                 )
             current_code = move_to
             loc = {'code': move_to, 'player_name': target_name}
@@ -3095,8 +3101,14 @@ class GameService:
             f"npc-observe:{session['current_turn']}:{actor['id']}",
         )
         await self._insert_message(
-            cur, session['id'], turn['id'], 'narrator', None, 'narration',
-            content if player_location == current_code else f"{actor['display_name']}이(가) 행동을 했다.",
+            cur,
+            session['id'],
+            turn['id'],
+            'character',
+            actor['id'],
+            'npc_action',
+            content if player_location == current_code
+            else f"{actor['display_name']}이(가) 행동을 했다.",
         )
 
     async def _handle_reply(
@@ -3511,16 +3523,35 @@ class GameService:
             exclude_ids={str(actor['id']), target_id},
         )
 
-        await self._insert_message(
-            cur,
-            session['id'],
-            turn['id'],
-            'narrator',
-            None,
-            'narration',
-            exchange if state.get('current_location') == location_code
-            else f"{actor['display_name']}이(가) 행동을 했다.",
-        )
+        if state.get('current_location') == location_code:
+            await self._insert_message(
+                cur,
+                session['id'],
+                turn['id'],
+                'character',
+                actor['id'],
+                'dialogue',
+                actual_question,
+            )
+            await self._insert_message(
+                cur,
+                session['id'],
+                turn['id'],
+                'character',
+                target_id,
+                'dialogue',
+                reply,
+            )
+        else:
+            await self._insert_message(
+                cur,
+                session['id'],
+                turn['id'],
+                'character',
+                actor['id'],
+                'npc_action',
+                f"{actor['display_name']}이(가) 행동을 했다.",
+            )
 
     async def _npc_investigate(self, cur, session, turn, state, actor, location_code: str, intent: str) -> None:
         await cur.execute(
@@ -3705,9 +3736,9 @@ class GameService:
             cur,
             session['id'],
             turn['id'],
-            'narrator',
-            None,
-            'narration',
+            'character',
+            actor['id'],
+            'npc_action',
             public_observation if state.get('current_location') == location_code
             else f"{actor['display_name']}이(가) 행동을 했다.",
         )

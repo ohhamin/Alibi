@@ -2551,10 +2551,22 @@ class _MessageTimelineState extends State<_MessageTimeline> {
     return null;
   }
 
+  bool _startsAction(Map<String, dynamic> message, bool inDialogue) {
+    final speakerType = message['speaker_type'] as String? ?? 'system';
+    final kind = message['message_kind'] as String? ?? '';
+    if (kind == 'dialogue') return !inDialogue;
+    if (speakerType == 'player' || speakerType == 'character') {
+      return kind == 'choice_result' || kind == 'npc_action';
+    }
+    return false;
+  }
+
   List<Map<String, dynamic>> _timelineEntries() {
     final entries = <Map<String, dynamic>>[];
     String? previousTurnId;
     var roundNo = 0;
+    var hasAction = false;
+    var inDialogue = false;
 
     for (final message in widget.messages) {
       final turnId = '${message['turn_id'] ?? ''}';
@@ -2565,8 +2577,25 @@ class _MessageTimelineState extends State<_MessageTimeline> {
           'round_no': roundNo,
         });
         previousTurnId = turnId;
+        hasAction = false;
+        inDialogue = false;
       }
+
+      final kind = message['message_kind'] as String? ?? '';
+      final startsAction = _startsAction(message, inDialogue);
+      if (startsAction && hasAction) {
+        entries.add(const <String, dynamic>{'_type': 'action_divider'});
+      }
+      if (startsAction) hasAction = true;
       entries.add(message);
+
+      if (kind == 'dialogue') {
+        inDialogue = true;
+      } else if ((message['speaker_type'] as String?) == 'player' ||
+          (message['speaker_type'] as String?) == 'character' ||
+          (message['speaker_type'] as String?) == 'system') {
+        inDialogue = false;
+      }
     }
     return entries;
   }
@@ -2604,16 +2633,82 @@ class _MessageTimelineState extends State<_MessageTimeline> {
     );
   }
 
+  Widget _actionDivider() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          const dashWidth = 5.0;
+          const gap = 5.0;
+          final count = (constraints.maxWidth / (dashWidth + gap)).floor();
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: List.generate(
+              count,
+              (_) => Container(
+                width: dashWidth,
+                height: 1,
+                color: const Color(0xFF393D45),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget _message(BuildContext context, Map<String, dynamic> item) {
     final type = item['speaker_type'] as String? ?? 'system';
     final isPlayer = type == 'player';
-    final isNarration = type == 'narrator' || type == 'system';
+    final isNarration = type == 'narrator';
+
+    if (type == 'system') {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(13, 11, 13, 11),
+          decoration: BoxDecoration(
+            color: AppTheme.brass.withValues(alpha: .07),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: AppTheme.brass.withValues(alpha: .24),
+            ),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(
+                Icons.campaign_outlined,
+                size: 17,
+                color: AppTheme.brass,
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'SYSTEM',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: AppTheme.brass,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 1.1,
+                          ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(item['content'] as String? ?? ''),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     final speaker = item['speaker_name'] as String? ??
-        (type == 'narrator'
-            ? '게임 마스터'
-            : type == 'system'
-                ? '시스템'
-                : '나');
+        (type == 'narrator' ? '게임 마스터' : '나');
 
     if (isNarration) {
       return Padding(
@@ -2738,6 +2833,9 @@ class _MessageTimelineState extends State<_MessageTimeline> {
         final entry = entries[index];
         if (entry['_type'] == 'round_header') {
           return _roundHeader(context, entry['round_no'] as int);
+        }
+        if (entry['_type'] == 'action_divider') {
+          return _actionDivider();
         }
         return _message(context, entry);
       },
