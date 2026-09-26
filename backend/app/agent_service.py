@@ -94,8 +94,8 @@ class AgentService:
         self.client = (
             AsyncOpenAI(
                 api_key=settings.openai_api_key,
-                timeout=min(settings.openai_timeout_seconds, 15.0),
-                max_retries=1,
+                timeout=min(settings.openai_timeout_seconds, 10.0),
+                max_retries=0,
             )
             if settings.openai_api_key
             else None
@@ -510,35 +510,29 @@ reasoning에는 지목에 영향을 준 구체적인 단서·시간·진술을 �
         if self.client is None:
             return fallback
 
-        for attempt in range(2):
-            try:
-                retry_suffix = (
-                    ''
-                    if attempt == 0
-                    else '\n\n이전 응답을 파싱하지 못했다. 설명이나 코드펜스 없이 완전한 JSON 객체 하나만 짧게 다시 출력한다.'
-                )
-                response = await self.client.responses.create(
-                    model=self.settings.openai_model,
-                    instructions=instructions + retry_suffix,
-                    input=input_text,
-                    max_output_tokens=min(self.settings.openai_max_output_tokens, 180),
-                )
-                raw = (response.output_text or '').strip()
-                if raw.startswith('```'):
-                    raw = raw.split('\n', 1)[1] if '\n' in raw else raw
-                    raw = raw.rsplit('```', 1)[0].strip()
-                start = raw.find('{')
-                end = raw.rfind('}')
-                if start >= 0 and end > start:
-                    raw = raw[start:end + 1]
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    return parsed
-            except (OpenAIError, json.JSONDecodeError, TypeError, ValueError):
-                if attempt == 0:
-                    logger.warning('OpenAI structured response parse failed; retrying once')
-                else:
-                    logger.exception('OpenAI structured game response failed twice; using fallback')
+        try:
+            response = await self.client.responses.create(
+                model=self.settings.openai_model,
+                instructions=instructions,
+                input=input_text,
+                max_output_tokens=min(self.settings.openai_max_output_tokens, 180),
+            )
+            raw = (response.output_text or '').strip()
+            if raw.startswith('```'):
+                raw = raw.split('\n', 1)[1] if '\n' in raw else raw
+                raw = raw.rsplit('```', 1)[0].strip()
+            json_start = raw.find('{')
+            json_end = raw.rfind('}')
+            if json_start >= 0 and json_end > json_start:
+                raw = raw[json_start:json_end + 1]
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except (OpenAIError, json.JSONDecodeError, TypeError, ValueError):
+            logger.warning(
+                'OpenAI structured response failed; using deterministic fallback',
+                exc_info=True,
+            )
         return fallback
 
     def _fallback_detective_verdict(
