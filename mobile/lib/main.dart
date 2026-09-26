@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -89,12 +91,36 @@ class AuthGate extends StatefulWidget {
 }
 
 class _AuthGateState extends State<AuthGate> {
+  StreamSubscription<AuthState>? _authSubscription;
+  late bool _signedIn;
+
   @override
   void initState() {
     super.initState();
-    Supabase.instance.client.auth.onAuthStateChange.listen((_) {
-      if (mounted) setState(() {});
-    });
+    _signedIn = Supabase.instance.client.auth.currentSession != null;
+    _authSubscription =
+        Supabase.instance.client.auth.onAuthStateChange.listen(
+      (data) {
+        if (!mounted) return;
+        if (data.session != null) {
+          setState(() => _signedIn = true);
+          return;
+        }
+        if (data.event == AuthChangeEvent.signedOut) {
+          setState(() => _signedIn = false);
+        }
+      },
+      onError: (_, __) {
+        // A temporary network/auth refresh error must not eject the user
+        // from the game. ApiClient will refresh/retry on the next request.
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
   }
 
   @override
@@ -107,7 +133,7 @@ class _AuthGateState extends State<AuthGate> {
         opacity: animation,
         child: child,
       ),
-      child: Supabase.instance.client.auth.currentSession == null
+      child: !_signedIn
           ? const LoginScreen(key: ValueKey('login'))
           : const HomeScreen(key: ValueKey('home')),
     );
