@@ -62,7 +62,7 @@ class PixelEvidenceArt extends StatelessWidget {
   };
 
   // 1600 x 640 extra board: five 320px generated evidence images per row.
-  // Several low-priority/ambient clues intentionally reuse a close visual.
+  // Ambient clues can intentionally reuse a visually close, non-empty cell.
   static const Map<String, Rect> _extraCrops = {
     // Row 1
     'clue-expense': Rect.fromLTWH(0.0, 0.0, 0.2, 0.5),
@@ -70,14 +70,14 @@ class PixelEvidenceArt extends StatelessWidget {
     'clue-irrelevant-tea-wrapper': Rect.fromLTWH(0.0, 0.0, 0.2, 0.5),
     'clue-irrelevant-toner-invoice': Rect.fromLTWH(0.0, 0.0, 0.2, 0.5),
     'clue-manuscript': Rect.fromLTWH(0.2, 0.0, 0.2, 0.5),
+    'clue-irrelevant-bookmark': Rect.fromLTWH(0.2, 0.0, 0.2, 0.5),
+    'clue-irrelevant-raffle-ticket': Rect.fromLTWH(0.2, 0.0, 0.2, 0.5),
     'clue-han-cancel-contract': Rect.fromLTWH(0.4, 0.0, 0.2, 0.5),
     'clue-jiho-debt-letter': Rect.fromLTWH(0.4, 0.0, 0.2, 0.5),
     'clue-jiho-insurance': Rect.fromLTWH(0.4, 0.0, 0.2, 0.5),
+    'clue-irrelevant-old-photo': Rect.fromLTWH(0.4, 0.0, 0.2, 0.5),
     'clue-safe-key': Rect.fromLTWH(0.6, 0.0, 0.2, 0.5),
     'clue-irrelevant-coin-battery': Rect.fromLTWH(0.6, 0.0, 0.2, 0.5),
-    'clue-irrelevant-raffle-ticket': Rect.fromLTWH(0.8, 0.0, 0.2, 0.5),
-    'clue-irrelevant-event-badge': Rect.fromLTWH(0.8, 0.0, 0.2, 0.5),
-    'clue-irrelevant-old-photo': Rect.fromLTWH(0.8, 0.0, 0.2, 0.5),
 
     // Row 2
     'clue-irrelevant-return-label': Rect.fromLTWH(0.0, 0.5, 0.2, 0.5),
@@ -89,12 +89,13 @@ class PixelEvidenceArt extends StatelessWidget {
     'clue-yuna-resignation-note': Rect.fromLTWH(0.6, 0.5, 0.2, 0.5),
     'clue-min-business-card': Rect.fromLTWH(0.8, 0.5, 0.2, 0.5),
     'clue-han-shoeprint': Rect.fromLTWH(0.8, 0.5, 0.2, 0.5),
+    'clue-irrelevant-event-badge': Rect.fromLTWH(0.8, 0.5, 0.2, 0.5),
   };
 
   @override
   Widget build(BuildContext context) {
     final extraCrop = _extraCrops[clueCode];
-    final coreCrop = _coreCrops[clueCode] ?? _coreCrops['clue-safe-key']!;
+    final coreCrop = _coreCrops[clueCode] ?? _coreCrops['clue-manuscript']!;
 
     return Container(
       width: size,
