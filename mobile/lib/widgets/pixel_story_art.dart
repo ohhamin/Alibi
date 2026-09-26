@@ -48,7 +48,7 @@ class PixelEvidenceArt extends StatelessWidget {
   final double size;
 
   // 2560 x 1024 raster board: five 512px evidence images per row.
-  static const Map<String, Rect> _crops = {
+  static const Map<String, Rect> _coreCrops = {
     'clue-safe-key': Rect.fromLTWH(0.0, 0.0, 0.2, 0.5),
     'clue-coffee-receipt': Rect.fromLTWH(0.2, 0.0, 0.2, 0.5),
     'clue-expense': Rect.fromLTWH(0.4, 0.0, 0.2, 0.5),
@@ -61,9 +61,40 @@ class PixelEvidenceArt extends StatelessWidget {
     'clue-brass-dust': Rect.fromLTWH(0.8, 0.5, 0.2, 0.5),
   };
 
+  // 1600 x 640 extra board: five 320px generated evidence images per row.
+  // Several low-priority/ambient clues intentionally reuse a close visual.
+  static const Map<String, Rect> _extraCrops = {
+    // Row 1
+    'clue-expense': Rect.fromLTWH(0.0, 0.0, 0.2, 0.5),
+    'clue-irrelevant-lottery-ticket': Rect.fromLTWH(0.0, 0.0, 0.2, 0.5),
+    'clue-irrelevant-tea-wrapper': Rect.fromLTWH(0.0, 0.0, 0.2, 0.5),
+    'clue-irrelevant-toner-invoice': Rect.fromLTWH(0.0, 0.0, 0.2, 0.5),
+    'clue-manuscript': Rect.fromLTWH(0.2, 0.0, 0.2, 0.5),
+    'clue-han-cancel-contract': Rect.fromLTWH(0.4, 0.0, 0.2, 0.5),
+    'clue-jiho-debt-letter': Rect.fromLTWH(0.4, 0.0, 0.2, 0.5),
+    'clue-jiho-insurance': Rect.fromLTWH(0.4, 0.0, 0.2, 0.5),
+    'clue-safe-key': Rect.fromLTWH(0.6, 0.0, 0.2, 0.5),
+    'clue-irrelevant-coin-battery': Rect.fromLTWH(0.6, 0.0, 0.2, 0.5),
+    'clue-irrelevant-raffle-ticket': Rect.fromLTWH(0.8, 0.0, 0.2, 0.5),
+    'clue-irrelevant-event-badge': Rect.fromLTWH(0.8, 0.0, 0.2, 0.5),
+    'clue-irrelevant-old-photo': Rect.fromLTWH(0.8, 0.0, 0.2, 0.5),
+
+    // Row 2
+    'clue-irrelevant-return-label': Rect.fromLTWH(0.0, 0.5, 0.2, 0.5),
+    'clue-irrelevant-milk-label': Rect.fromLTWH(0.0, 0.5, 0.2, 0.5),
+    'clue-irrelevant-umbrella-tag': Rect.fromLTWH(0.0, 0.5, 0.2, 0.5),
+    'clue-irrelevant-loyalty-card': Rect.fromLTWH(0.2, 0.5, 0.2, 0.5),
+    'clue-coffee-receipt': Rect.fromLTWH(0.2, 0.5, 0.2, 0.5),
+    'clue-yuna-polish-cloth': Rect.fromLTWH(0.4, 0.5, 0.2, 0.5),
+    'clue-yuna-resignation-note': Rect.fromLTWH(0.6, 0.5, 0.2, 0.5),
+    'clue-min-business-card': Rect.fromLTWH(0.8, 0.5, 0.2, 0.5),
+    'clue-han-shoeprint': Rect.fromLTWH(0.8, 0.5, 0.2, 0.5),
+  };
+
   @override
   Widget build(BuildContext context) {
-    final crop = _crops[clueCode] ?? _crops['clue-safe-key']!;
+    final extraCrop = _extraCrops[clueCode];
+    final coreCrop = _coreCrops[clueCode] ?? _coreCrops['clue-safe-key']!;
 
     return Container(
       width: size,
@@ -75,10 +106,12 @@ class PixelEvidenceArt extends StatelessWidget {
       ),
       clipBehavior: Clip.antiAlias,
       child: SheetCropImage(
-        asset: AppAssets.evidenceSheet,
-        crop: crop,
-        sheetWidth: 2560,
-        sheetHeight: 1024,
+        asset: extraCrop == null
+            ? AppAssets.evidenceSheet
+            : AppAssets.evidenceExtraSheet,
+        crop: extraCrop ?? coreCrop,
+        sheetWidth: extraCrop == null ? 2560 : 1600,
+        sheetHeight: extraCrop == null ? 1024 : 640,
         fit: BoxFit.cover,
         filterQuality: FilterQuality.high,
       ),
