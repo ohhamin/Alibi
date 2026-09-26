@@ -1,28 +1,124 @@
 # ALIBI
 
-AI 캐릭터와 대화하며 사건을 푸는 턴제 추리게임 MVP입니다.
+AI 캐릭터들이 각자의 비밀·목표·기억을 가지고 행동하는 턴제 추리게임입니다.
 
-현재 첫 스토리 **《폐점 후의 서점》** 기준으로 다음 흐름이 연결되어 있습니다.
+현재 첫 스토리 **《폐점 후의 서점》**을 기준으로 Flutter 모바일 앱, FastAPI 백엔드, Supabase, OpenAI 에이전트가 연결되어 있습니다.
+
+## 현재 게임 흐름
 
 - Supabase Auth 이메일 로그인/가입
-- 공개 스토리 목록 및 진행 중 세션 불러오기
 - 4명의 용의자 중 플레이 캐릭터 선택
-- 선택한 캐릭터의 개인 배경/목표/비밀만 플레이어에게 공개
-- 6라운드, 라운드당 핵심 행동 2회
-- 장소 이동(무료), 수색, 조사, AI 인물 심문
-- 발견한 증거를 인물에게 제시하고 AI 반응 확인
-- 발견 증거/메시지/턴 상태 자동 저장
-- 캐릭터별 `agent_memories` 격리
-- 최종 지목 및 엔딩/정답 공개
+- 선택 캐릭터의 개인 배경·목표·비밀·사건 당시 타임라인 확인
+- 총 6라운드 진행
+- 한 라운드는 **모든 인물이 1행동씩 두 바퀴** 순환
+  - 플레이어
+  - 나머지 용의자 3명
+  - 탐정 강해진
+  - 다시 같은 순서로 두 번째 행동
+- 각 주행동 전에 인접 장소 1칸 무료 이동 가능
+- 조사/수색/대화/증거 제시/행동 넘기기 지원
+- NPC↔NPC 대화도 플레이어가 같은 장소에서 목격하면 상황판에 개별 말풍선으로 표시
+- 시스템 공지·라운드 구분·행동 구분선을 분리한 사건 채팅형 상황판
+- 라운드 종료 인터랙션 제공
+
+## 증거 시스템
+
+### 비공개 소지
+
+게임 시작 시 4명의 용의자가 각각 **서로 중복되지 않는 증거 3개**를 무작위로 받습니다.
+
+- 플레이어가 찾은 증거 → 플레이어 비공개 소지
+- NPC가 찾은 증거 → 해당 NPC 비공개 소지
+- 한 세션에서 같은 증거는 두 사람이 동시에 발견할 수 없음
+- 비공개 증거는 일반 플레이 중 자동 공개되지 않음
+
+### 공개되는 경우
+
+- 탐정이 직접 발견한 증거 → 즉시 공개
+- 플레이어가 탐정에게 직접 제시한 비공개 증거 → 공개
+- 2·5라운드 비공개 취조 전에 강제로 제출한 증거 → 공개
+
+증거 제출은 **매 라운드가 아니라 2라운드와 5라운드의 탐정 취조 직전에만 1개씩** 요구됩니다.
+
+NPC는 자기 알리바이에 유리한 증거를 우선 제출하고 자신에게 불리한 증거는 가능한 오래 숨기도록 행동합니다.
+
+## 대화와 AI 캐릭터
+
+각 캐릭터는 서로 분리된 상태를 가집니다.
+
+- 전용 시스템 프롬프트
+- 개인 배경과 목표
+- 알고 있는 사실
+- 거짓말 정책
+- 개인 기억(`agent_memories`)
+- 다른 용의자에 대한 관계도와 의심도
+
+대화, 목격, 공개 증거에 따라 관계와 의심도가 달라집니다.
+
+NPC는 탐정처럼 사건 전체를 조사하는 대신 **자기 알리바이 구축, 자기방어, 불리한 증거 해명**을 우선합니다.
+
+같은 시간대·같은 알리바이 질문을 표현만 바꿔 반복하는 경우 서버에서 주제 중복을 감지해 다른 질문이나 조사 행동으로 전환합니다.
+
+## 2·5라운드 탐정 비공개 취조
+
+2라운드와 5라운드 종료 시:
+
+1. 증거를 가진 각 용의자가 증거 1개를 탐정에게 제출
+2. 제출 증거는 모두 공개
+3. 탐정이 각 용의자를 비공개 취조
+4. 플레이어는 탐정과 실제 대화 세션 진행
+5. 대화 내용은 탐정과 해당 인물만 알 수 있음
+6. 단, 탐정에게 제시한 증거 자체는 공개
+
+NPC 3명의 자동 취조 답변은 지연을 줄이기 위해 병렬 생성됩니다.
+
+## 최종 결과
+
+6라운드가 끝나면 바로 진실을 공개하지 않습니다.
+
+1. 모든 용의자가 자신과 탐정을 제외한 한 명을 예상 범인으로 선택
+2. 이유를 제출
+3. 플레이어는 남아 있는 비공개 증거 1개를 최종 제보로 선택 가능(선택 사항)
+4. **용의자들의 선택**을 먼저 표시
+5. `탐정의 선택 보기` 버튼으로 탐정 판정 공개
+6. `사건의 진실 보기` 버튼으로 실제 사건의 진실 공개
+
+탐정은 직접 확보한 증거와 진술을 가장 중요하게 보고, 용의자들의 최종 의견과 제안된 증거를 보조 정보로 사용합니다.
+
+### 플레이어 성공 조건
+
+- 탐정이 플레이어를 최종 범인으로 지목함 → **실패**
+- 탐정이 다른 인물을 지목함 → **성공**
+
+플레이어가 실제 범인인지 여부와 무관하게 이 기준으로 성공/실패가 결정됩니다.
+
+## NPC 행동 속도 최적화
+
+탐정의 수사력과 긴장감은 유지하면서 **용의자 NPC 행동 선택만 경량화**되어 있습니다.
+
+용의자 행동 선택 시 전체 과거 기록을 매번 전송하지 않습니다.
+
+- 알고 있는 사실: 초기 핵심 2개 + 최신 3개, 최대 5개
+- 최근 기억: 최대 2개, 각 280자
+- 성격 정보의 payload 중복 제거
+- 위치·같은 방 인물·인접 장소는 현재 상태만 전달
+- 용의자 행동 선택 LLM 상한: 약 6.5초
+- 상한 초과/OpenAI 오류 시 deterministic fallback
+
+탐정 행동은 기존 컨텍스트와 시간 제한을 그대로 유지합니다.
+
+공통 OpenAI 클라이언트는 내부 재시도를 하지 않고, 구조화 응답 실패 시 게임 상태를 멈추지 않고 fallback으로 진행합니다.
 
 ## 운영 구조
 
 ```text
-Flutter
+Flutter Android
   ├─ Supabase Auth
-  └─ HTTP/HTTPS
+  └─ HTTPS
        ↓
-AWS EC2
+https://alibi-api.duckdns.org
+       ↓
+AWS EC2 (Amazon Linux)
   ├─ Nginx :80/:443
   └─ Docker
       └─ FastAPI :8000 (localhost only)
@@ -30,17 +126,33 @@ AWS EC2
           └─ OpenAI Responses API
 ```
 
-Flutter는 `game_private`를 직접 읽지 않습니다. 게임의 비밀 설정, 캐릭터 프롬프트, 정답과 OpenAI API Key는 FastAPI 서버만 접근합니다.
+Flutter는 `game_private` 스키마를 직접 읽지 않습니다.
 
-모바일은 Supabase 로그인 토큰을 `Authorization: Bearer ...`로 백엔드에 전달하고, 백엔드는 Supabase Auth에서 토큰을 검증한 뒤 모든 세션 접근에 `user_id` 소유권 조건을 적용합니다.
+스토리 정답, 캐릭터 비밀 프롬프트, 비공개 증거 소유 상태와 OpenAI API Key는 FastAPI 백엔드만 접근합니다.
 
-## 1. 로컬 Backend 실행
+## 인증
+
+모바일은 Supabase access token을 `Authorization: Bearer ...`로 전송합니다.
+
+- access token 만료 약 60초 전에 선제 갱신
+- API가 401을 반환하면 `refreshSession()` 후 1회 재시도
+- 일시적인 네트워크/DNS 오류를 로그아웃으로 취급하지 않음
+- 실제 `signedOut` 이벤트일 때만 로그인 화면으로 이동
+
+## 네트워크/자동 진행 보호
+
+NPC 턴 자동 진행 중 네트워크 오류가 발생하면 무한 `/advance` 호출을 하지 않습니다.
+
+- 재시도 백오프
+- 반복 실패 시 자동 진행 일시정지
+- 같은 세션의 `/advance` 서버 동시 실행 직렬화
+- 완료된 게임에 대한 재호출은 엔딩 상태 유지
+
+## Backend 로컬 실행
 
 ```bash
 cd backend
 cp .env.example .env
-
-# DATABASE_URL / OPENAI_API_KEY 입력
 
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -48,94 +160,47 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-확인:
+필수 환경 변수 예시:
+
+```env
+DATABASE_URL=postgresql://...
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-5.6-luna
+OPENAI_TIMEOUT_SECONDS=30
+OPENAI_MAX_OUTPUT_TOKENS=400
+```
+
+헬스 체크:
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-OpenAI 키가 정상 주입되어 있으면 `openai_configured: true`가 표시됩니다.
-
-## 2. AWS EC2 배포
-
-권장 MVP 구성:
-
-- Amazon Linux 2023
-- 작은 burstable EC2 인스턴스
-- gp3 EBS
-- Security Group
-  - TCP 80: 인터넷 공개
-  - TCP 443: 인터넷 공개
-  - TCP 22: 필요할 때만 본인 IP /32
-- 가능하면 SSH 대신 AWS Systems Manager Session Manager 사용
-- FastAPI 8000 포트는 외부에 공개하지 않음
-
-### 서버 최초 세팅
-
-EC2에 접속한 뒤:
+## AWS EC2 운영 배포
 
 ```bash
 git clone https://github.com/ohhamin/Alibi.git
 cd Alibi
-
 bash deploy/ec2/bootstrap-amazon-linux.sh
 ```
 
-bootstrap 스크립트가 다음을 설치/설정합니다.
-
-- Git
-- Docker
-- Docker Compose
-- Nginx
-- 저장소 최신 `master`
-- Nginx → `127.0.0.1:8000` reverse proxy
-- `backend/.env.production` 템플릿 생성
-
-### 운영 비밀값 입력
+운영 환경값:
 
 ```bash
-cd ~/Alibi
 nano backend/.env.production
 ```
 
-필수:
-
-```env
-DATABASE_URL=postgresql://...
-OPENAI_API_KEY=sk-...
-```
-
-`backend/.env.production`은 Git에 커밋되지 않습니다.
-
-### Backend 시작
+시작/재배포:
 
 ```bash
-cd ~/Alibi
 docker compose -f docker-compose.prod.yml up -d --build
-```
-
-또는 이후 배포부터:
-
-```bash
-bash deploy/ec2/deploy.sh
 ```
 
 상태 확인:
 
 ```bash
 docker compose -f docker-compose.prod.yml ps
-curl http://127.0.0.1:8000/health
-curl http://localhost/health
-```
-
-예상 응답:
-
-```json
-{
-  "status": "ok",
-  "environment": "production",
-  "openai_configured": true
-}
+curl https://alibi-api.duckdns.org/health
 ```
 
 로그:
@@ -144,68 +209,23 @@ curl http://localhost/health
 docker compose -f docker-compose.prod.yml logs -f backend
 ```
 
-## 3. Nginx
+## Flutter 실행
 
-기본 설정:
-
-`deploy/nginx/alibi.conf`
-
-현재는 EC2 Public IP로 바로 테스트할 수 있도록 `server_name _;` 입니다.
-
-도메인을 연결하면:
-
-```nginx
-server_name api.example.com;
-```
-
-형태로 바꾸고 HTTPS 인증서를 연결하면 됩니다.
-
-FastAPI의 8000 포트는 Docker가 `127.0.0.1:8000`에만 바인딩하므로 인터넷에서 직접 접근할 수 없습니다.
-
-## 4. Flutter 연결
-
-로컬 개발:
+로컬 Android emulator:
 
 ```bash
 flutter run \
   --dart-define=API_BASE_URL=http://10.0.2.2:8000/api/v1
 ```
 
-EC2 Public IP 테스트:
+운영 API:
 
 ```bash
 flutter run \
-  --dart-define=API_BASE_URL=http://<EC2_PUBLIC_IP>/api/v1
+  --dart-define=API_BASE_URL=https://alibi-api.duckdns.org/api/v1
 ```
 
-도메인 + HTTPS 적용 후:
-
-```bash
-flutter run \
-  --dart-define=API_BASE_URL=https://api.example.com/api/v1
-```
-
-최종 앱 배포에서는 HTTPS를 사용합니다.
-
-## OpenAI 호출 정책
-
-- OpenAI API Key는 백엔드에만 존재
-- 캐릭터별 격리된 비공개 프롬프트/기억만 전달
-- 타 캐릭터 비밀이나 미발견 증거는 전달하지 않음
-- timeout 기본 30초
-- 최대 출력 400 tokens
-- OpenAI 일시 장애 시 deterministic fallback 대사 사용
-
-환경 변수:
-
-```env
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-5.6-luna
-OPENAI_TIMEOUT_SECONDS=30
-OPENAI_MAX_OUTPUT_TOKENS=400
-```
-
-## API
+## 주요 API
 
 - `GET /health`
 - `GET /api/v1/stories`
@@ -213,28 +233,60 @@ OPENAI_MAX_OUTPUT_TOKENS=400
 - `POST /api/v1/sessions`
 - `GET /api/v1/sessions/{session_id}`
 - `POST /api/v1/sessions/{session_id}/actions`
-- `POST /api/v1/sessions/{session_id}/accuse`
+- `POST /api/v1/sessions/{session_id}/advance`
+- `POST /api/v1/sessions/{session_id}/final-vote`
 
-행동 타입은 현재 `move`, `search`, `inspect`, `ask`, `present`를 지원합니다.
+주요 행동 타입:
 
-## 배포 관련 파일
+- `move`
+- `act`
+- `search`
+- `inspect`
+- `ask`
+- `present`
+- `reply`
+- `conversation_present`
+- `end_conversation`
+- `submit_evidence`
+- `skip`
+
+## 저장 구조
+
+주요 테이블/스키마:
 
 ```text
-docker-compose.prod.yml
-backend/.env.production.example
-deploy/
-├─ ec2/
-│  ├─ bootstrap-amazon-linux.sh
-│  └─ deploy.sh
-└─ nginx/
-   └─ alibi.conf
+public.game_sessions
+public.game_turns
+public.player_actions
+public.session_messages
+public.session_clues
+public.session_locations
+
+game_private.session_character_states
+game_private.session_evidence_holdings
+game_private.agent_memories
+game_private.internal_events
+game_private.story_clues
+game_private.story_solutions
 ```
 
-## 다음 개발 우선순위
+## CI
 
-1. EC2 실제 인스턴스 배포 + 도메인/HTTPS
-2. NPC/탐정의 라운드 종료 자동 행동 및 `scripted_events`
-3. 증거 제시에 따른 인물별 스트레스/신뢰도 변화
-4. 강해진 탐정의 독립 추리 및 범인 지목
-5. `llm_runs` 및 OpenAI 토큰/비용 추적
-6. 스토리 커버 이미지, 효과음, 타이핑/대화 연출
+GitHub Actions에서 Backend와 Flutter를 검증합니다.
+
+Backend:
+
+- Python compile/test
+
+Mobile:
+
+- Android project generation
+- `flutter analyze`
+- Release APK build
+- `alibi-apk` artifact upload
+
+## 현재 구현 상태
+
+현재 첫 스토리 《폐점 후의 서점》은 다음 전체 흐름까지 플레이할 수 있습니다.
+
+**캐릭터 선택 → 초기 증거 배분 → 6라운드 수사/대화 → 2·5라운드 증거 제출·취조 → 용의자 최종 의견 → 탐정 판정 → 성공/실패 → 사건의 진실 공개**
