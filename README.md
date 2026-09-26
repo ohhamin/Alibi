@@ -174,7 +174,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```env
 DATABASE_URL=postgresql://...
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-5.6-luna
+OPENAI_MODEL=gpt-6-luna
 OPENAI_TIMEOUT_SECONDS=30
 OPENAI_MAX_OUTPUT_TOKENS=400
 ```
