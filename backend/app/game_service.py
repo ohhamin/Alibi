@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 from typing import Any
 from uuid import UUID, uuid4
@@ -30,6 +31,14 @@ def _as_list(value: Any) -> list[Any]:
 class GameService:
     def __init__(self, agent_service: AgentService):
         self.agent_service = agent_service
+        self._advance_locks: dict[str, asyncio.Lock] = {}
+
+    async def _session_advance_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._advance_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._advance_locks[session_id] = lock
+        return lock
 
     async def list_stories(self) -> list[dict[str, Any]]:
         query = """
@@ -762,6 +771,13 @@ class GameService:
                 }
 
     async def advance_game(self, user_id: str, session_id: str) -> dict[str, Any]:
+        lock = await self._session_advance_lock(session_id)
+        if lock.locked():
+            return await self.get_session_state(user_id, session_id)
+        async with lock:
+            return await self._advance_game_locked(user_id, session_id)
+
+    async def _advance_game_locked(self, user_id: str, session_id: str) -> dict[str, Any]:
         async with pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor(row_factory=dict_row) as cur:
