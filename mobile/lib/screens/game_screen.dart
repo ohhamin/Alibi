@@ -73,6 +73,8 @@ class _GameScreenState extends State<GameScreen> {
       _state['active_conversation'] as Map<String, dynamic>?;
   Map<String, dynamic>? get _pendingFinalVote =>
       _state['pending_final_vote'] as Map<String, dynamic>?;
+  Map<String, dynamic>? get _pendingFinalVote =>
+      _state['pending_final_vote'] as Map<String, dynamic>?;
 
   String get _sessionId => _session['id'] as String;
   String? get _playerCharacterId => _session['player_character_id'] as String?;
@@ -218,8 +220,12 @@ class _GameScreenState extends State<GameScreen> {
 
     if (_pendingQuestion != null ||
         _pendingEvidenceSubmission != null ||
-        _pendingFinalVote != null) return;
-    if (_autoAdvancePaused) return;
+        _pendingFinalVote != null) {
+      return;
+    }
+    if (_autoAdvancePaused) {
+      return;
+    }
 
     if (_currentActorId != _playerCharacterId && !_autoAdvanceScheduled) {
       _autoAdvanceScheduled = true;
@@ -1464,6 +1470,165 @@ class _GameScreenState extends State<GameScreen> {
 
     opinionController.dispose();
     _submissionSheetOpen = false;
+    _afterStateChanged();
+  }
+
+  Future<void> _openFinalVoteSheet() async {
+    if (_finalVoteSheetOpen || _pendingFinalVote == null || !mounted) return;
+    _finalVoteSheetOpen = true;
+    final pending = _pendingFinalVote!;
+    final candidates = ((pending['candidates'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>();
+    String? selectedId = candidates.isNotEmpty ? '${candidates.first['id']}' : null;
+    String? selectedClueCode;
+    final reasonController = TextEditingController();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      builder: (sheetContext) => PopScope(
+        canPop: false,
+        child: StatefulBuilder(
+          builder: (sheetContext, setSheetState) {
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  16,
+                  16,
+                  16,
+                  MediaQuery.viewInsetsOf(sheetContext).bottom + 16,
+                ),
+                child: SizedBox(
+                  height: MediaQuery.sizeOf(sheetContext).height * .72,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.how_to_vote_outlined, color: AppTheme.brass),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Text(
+                              '최종 예상 범인 제출',
+                              style: Theme.of(sheetContext).textTheme.titleLarge,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        '탐정이 최종 판단을 내리기 전에, 자신과 탐정을 제외한 용의자 중 가장 의심되는 한 명과 이유를 제출하세요. 남은 비공개 증거를 하나 제안할 수도 있습니다.',
+                      ),
+                      const SizedBox(height: 14),
+                      Expanded(
+                        child: ListView(
+                          children: [
+                            ...candidates.map((candidate) {
+                              final candidateId = '${candidate['id']}';
+                              final selected = candidateId == selectedId;
+                              return ListTile(
+                                leading: Icon(
+                                  selected
+                                      ? Icons.radio_button_checked
+                                      : Icons.radio_button_unchecked,
+                                  color: selected ? AppTheme.brass : null,
+                                ),
+                                title: Text(
+                                  candidate['name'] as String? ?? '용의자',
+                                ),
+                                selected: selected,
+                                onTap: _busy
+                                    ? null
+                                    : () => setSheetState(
+                                          () => selectedId = candidateId,
+                                        ),
+                              );
+                            }),
+                            const SizedBox(height: 8),
+                            TextField(
+                              controller: reasonController,
+                              minLines: 3,
+                              maxLines: 6,
+                              decoration: const InputDecoration(
+                                labelText: '지목 이유',
+                                hintText: '대화, 동선, 공개 증거 등을 근거로 적어 주세요.',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            DropdownButtonFormField<String?>(
+                              initialValue: null,
+                              decoration: const InputDecoration(
+                                labelText: '남은 비공개 증거 제안 (선택)',
+                                border: OutlineInputBorder(),
+                              ),
+                              items: [
+                                const DropdownMenuItem<String?>(
+                                  value: null,
+                                  child: Text('제안하지 않음'),
+                                ),
+                                ..._inventoryItems.map(
+                                  (item) => DropdownMenuItem<String?>(
+                                    value: item['clue_code'] as String?,
+                                    child: Text(
+                                      item['title'] as String? ?? '증거',
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              onChanged: _busy
+                                  ? null
+                                  : (value) => setSheetState(() => selectedClueCode = value),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _busy || selectedId == null
+                              ? null
+                              : () async {
+                                  final reason = reasonController.text.trim();
+                                  if (reason.isEmpty) {
+                                    ScaffoldMessenger.of(sheetContext).showSnackBar(
+                                      const SnackBar(content: Text('지목 이유를 입력해 주세요.')),
+                                    );
+                                    return;
+                                  }
+                                  await _run(
+                                    () => _api.post(
+                                      '/sessions/$_sessionId/final-vote',
+                                      body: {
+                                        'culprit_character_id': selectedId,
+                                        'reasoning': reason,
+                                        'clue_code': ?selectedClueCode,
+                                      },
+                                    ),
+                                  );
+                                  if (sheetContext.mounted && _pendingFinalVote == null) {
+                                    Navigator.pop(sheetContext);
+                                  }
+                                },
+                          icon: const Icon(Icons.how_to_vote_outlined),
+                          label: const Text('최종 의견 제출'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+    reasonController.dispose();
+    _finalVoteSheetOpen = false;
     _afterStateChanged();
   }
 
