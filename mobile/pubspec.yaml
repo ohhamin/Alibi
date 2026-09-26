@@ -3,7 +3,7 @@ description: AI turn-based mystery game.
 publish_to: none
 version: 0.1.0+1
 
-# build-trigger: round-transition-evidence-art-2026-09-26-v1
+# build-trigger: readable-timeline-npc-chat-2026-09-26-v1
 environment:
   sdk: '>=3.12.0 <4.0.0'
 
