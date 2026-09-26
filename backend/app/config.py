@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # Keep the OpenAI key server-side only. In AWS, inject it from Secrets Manager.
     openai_api_key: str | None = None
-    openai_model: str = 'gpt-5.6-luna'
+    openai_model: str = 'gpt-6-luna'
     openai_timeout_seconds: float = 30.0
     openai_max_output_tokens: int = 400
 
