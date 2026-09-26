@@ -11,7 +11,7 @@ unused = """  List<Map<String, dynamic>> get _suspectFinalVotes =>
 """
 text = text.replace(unused, '')
 
-old = """                            ...candidates.map(
+old_selector = """                            ...candidates.map(
                               (candidate) => RadioListTile<String>(
                                 value: '${candidate['id']}',
                                 groupValue: selectedId,
@@ -22,7 +22,7 @@ old = """                            ...candidates.map(
                               ),
                             ),
 """
-new = """                            ...candidates.map((candidate) {
+new_selector = """                            ...candidates.map((candidate) {
                               final candidateId = '${candidate['id']}';
                               final selected = candidateId == selectedId;
                               return ListTile(
@@ -44,8 +44,43 @@ new = """                            ...candidates.map((candidate) {
                               );
                             }),
 """
-if old not in text:
+if old_selector in text:
+    text = text.replace(old_selector, new_selector, 1)
+elif new_selector not in text:
     raise SystemExit('missing generated candidate selector')
-text = text.replace(old, new, 1)
+
+old_guard = """    if (_pendingQuestion != null ||
+        _pendingEvidenceSubmission != null ||
+        _pendingFinalVote != null) return;
+    if (_autoAdvancePaused) return;
+"""
+new_guard = """    if (_pendingQuestion != null ||
+        _pendingEvidenceSubmission != null ||
+        _pendingFinalVote != null) {
+      return;
+    }
+    if (_autoAdvancePaused) {
+      return;
+    }
+"""
+if old_guard in text:
+    text = text.replace(old_guard, new_guard, 1)
+
+old_body = """                                      body: {
+                                        'culprit_character_id': selectedId,
+                                        'reasoning': reason,
+                                        if (selectedClueCode != null)
+                                          'clue_code': selectedClueCode,
+                                      },
+"""
+new_body = """                                      body: {
+                                        'culprit_character_id': selectedId,
+                                        'reasoning': reason,
+                                        'clue_code': ?selectedClueCode,
+                                      },
+"""
+if old_body in text:
+    text = text.replace(old_body, new_body, 1)
+
 path.write_text(text)
 print('fixed', path)
