@@ -110,7 +110,7 @@ class _AuthGateState extends State<AuthGate> {
           setState(() => _signedIn = false);
         }
       },
-      onError: (_, __) {
+      onError: (Object error, StackTrace stackTrace) {
         // A temporary network/auth refresh error must not eject the user
         // from the game. ApiClient will refresh/retry on the next request.
       },
