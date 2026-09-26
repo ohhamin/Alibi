@@ -147,7 +147,7 @@ class AgentService:
                 model=self.settings.openai_model,
                 instructions=instructions,
                 input=f"{ctx.player_name}: {ctx.question}",
-                max_output_tokens=self.settings.openai_max_output_tokens,
+                max_output_tokens=min(self.settings.openai_max_output_tokens, 180),
             )
             text = (response.output_text or '').strip()
             return text or self._fallback_reply(ctx)
@@ -210,7 +210,7 @@ class AgentService:
                 model=self.settings.openai_model,
                 instructions=instructions,
                 input=json.dumps(payload, ensure_ascii=False, default=str),
-                max_output_tokens=self.settings.openai_max_output_tokens,
+                max_output_tokens=min(self.settings.openai_max_output_tokens, 180),
             )
             raw = (response.output_text or '').strip()
             if raw.startswith('```'):
@@ -310,7 +310,7 @@ JSON 형식:
                 model=self.settings.openai_model,
                 instructions=instructions,
                 input=safe_input,
-                max_output_tokens=min(self.settings.openai_max_output_tokens, 220),
+                max_output_tokens=min(self.settings.openai_max_output_tokens, 160),
             )
             text = (response.output_text or '').strip()
             return text or result_text
@@ -521,7 +521,7 @@ reasoning에는 지목에 영향을 준 구체적인 단서·시간·진술을 �
                     model=self.settings.openai_model,
                     instructions=instructions + retry_suffix,
                     input=input_text,
-                    max_output_tokens=self.settings.openai_max_output_tokens,
+                    max_output_tokens=min(self.settings.openai_max_output_tokens, 180),
                 )
                 raw = (response.output_text or '').strip()
                 if raw.startswith('```'):
