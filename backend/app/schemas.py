@@ -20,3 +20,9 @@ class ActionRequest(BaseModel):
 class AccuseRequest(BaseModel):
     culprit_character_id: UUID
     reasoning: str | None = Field(default=None, max_length=3000)
+
+
+class FinalVoteRequest(BaseModel):
+    culprit_character_id: UUID
+    reasoning: str = Field(min_length=1, max_length=1200)
+    clue_code: str | None = Field(default=None, max_length=200)
