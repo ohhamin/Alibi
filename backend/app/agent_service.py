@@ -422,10 +422,10 @@ JSON 형식:
         try:
             return await asyncio.wait_for(
                 self._json_response(instructions, serialized, fallback),
-                timeout=6.5,
+                timeout=5.0,
             )
         except TimeoutError:
-            logger.warning('NPC action selection exceeded 6.5s; using fallback')
+            logger.warning('NPC action selection exceeded 5.0s; using fallback')
             return fallback
 
     async def choose_detective_bonus_action(self, ctx: DetectiveBonusContext) -> dict[str, Any]:
