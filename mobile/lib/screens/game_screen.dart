@@ -27,6 +27,7 @@ class _GameScreenState extends State<GameScreen> {
   bool _conversationSheetOpen = false;
   bool _conversationMinimized = false;
   bool _submissionSheetOpen = false;
+  bool _finalVoteSheetOpen = false;
 
   Map<String, dynamic> get _session =>
       (_state['session'] as Map<String, dynamic>?) ?? const {};
@@ -70,6 +71,8 @@ class _GameScreenState extends State<GameScreen> {
       _state['pending_evidence_submission'] as Map<String, dynamic>?;
   Map<String, dynamic>? get _activeConversation =>
       _state['active_conversation'] as Map<String, dynamic>?;
+  Map<String, dynamic>? get _pendingFinalVote =>
+      _state['pending_final_vote'] as Map<String, dynamic>?;
 
   String get _sessionId => _session['id'] as String;
   String? get _playerCharacterId => _session['player_character_id'] as String?;
@@ -82,6 +85,7 @@ class _GameScreenState extends State<GameScreen> {
       _activeConversation == null &&
       _pendingQuestion == null &&
       _pendingEvidenceSubmission == null &&
+      _pendingFinalVote == null &&
       _currentActorId == _playerCharacterId;
   int get _movementRemaining =>
       (_publicState['movement_remaining'] as num?)?.toInt() ?? 0;
@@ -187,6 +191,16 @@ class _GameScreenState extends State<GameScreen> {
 
     if (_submissionSheetOpen) return;
 
+    if (_pendingFinalVote != null && !_finalVoteSheetOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _pendingFinalVote != null && !_finalVoteSheetOpen) {
+          _openFinalVoteSheet();
+        }
+      });
+      return;
+    }
+    if (_finalVoteSheetOpen) return;
+
     if (_activeConversation != null &&
         !_conversationSheetOpen &&
         !_conversationMinimized) {
@@ -202,7 +216,9 @@ class _GameScreenState extends State<GameScreen> {
       return;
     }
 
-    if (_pendingQuestion != null || _pendingEvidenceSubmission != null) return;
+    if (_pendingQuestion != null ||
+        _pendingEvidenceSubmission != null ||
+        _pendingFinalVote != null) return;
     if (_autoAdvancePaused) return;
 
     if (_currentActorId != _playerCharacterId && !_autoAdvanceScheduled) {
@@ -221,6 +237,8 @@ class _GameScreenState extends State<GameScreen> {
             _activeConversation != null ||
             _pendingQuestion != null ||
             _pendingEvidenceSubmission != null ||
+            _pendingFinalVote != null ||
+            _finalVoteSheetOpen ||
             _currentActorId == _playerCharacterId) {
           return;
         }
@@ -743,6 +761,10 @@ class _GameScreenState extends State<GameScreen> {
                     final name =
                         dossier['display_name'] as String? ?? '알 수 없는 인물';
                     final role = dossier['role_label'] as String? ?? '';
+                    final relationshipToPlayer =
+                        (dossier['relationship_to_player'] as num?)?.toInt();
+                    final suspicionOfPlayer =
+                        (dossier['suspicion_of_player'] as num?)?.toInt();
 
                     return Card(
                       clipBehavior: Clip.antiAlias,
@@ -780,6 +802,25 @@ class _GameScreenState extends State<GameScreen> {
                                   '공개된 기본 정보가 없습니다.',
                             ),
                           ),
+                          if (!isPlayer &&
+                              relationshipToPlayer != null &&
+                              suspicionOfPlayer != null) ...[
+                            const SizedBox(height: 12),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 6,
+                              children: [
+                                Chip(
+                                  avatar: const Icon(Icons.handshake_outlined, size: 16),
+                                  label: Text('나와의 관계 $relationshipToPlayer'),
+                                ),
+                                Chip(
+                                  avatar: const Icon(Icons.visibility_outlined, size: 16),
+                                  label: Text('나를 의심 $suspicionOfPlayer/100'),
+                                ),
+                              ],
+                            ),
+                          ],
                           if (locationName != null &&
                               locationName.trim().isNotEmpty) ...[
                             const SizedBox(height: 12),
@@ -1301,7 +1342,7 @@ class _GameScreenState extends State<GameScreen> {
                           const SizedBox(width: 9),
                           Expanded(
                             child: Text(
-                              '라운드 종료 · 증거 제출',
+                              '탐정 취조 전 · 증거 제출',
                               style: Theme.of(sheetContext)
                                   .textTheme
                                   .titleLarge,
@@ -1311,9 +1352,9 @@ class _GameScreenState extends State<GameScreen> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        '현재 소지한 증거 중 1개를 탐정에게 제출해야 합니다. '
+                        '2·5라운드의 비공개 취조가 시작되기 전에 현재 소지한 증거 중 1개를 탐정에게 제출해야 합니다. '
                         '제출한 증거와 아래 의견은 모든 인물에게 공개됩니다. '
-                        '숨기고 싶은 증거가 있다면 다른 증거를 선택하세요.',
+                        '나머지 증거는 계속 비공개로 숨길 수 있습니다.',
                         style: Theme.of(sheetContext).textTheme.bodyMedium,
                       ),
                       const SizedBox(height: 12),
@@ -1423,6 +1464,166 @@ class _GameScreenState extends State<GameScreen> {
 
     opinionController.dispose();
     _submissionSheetOpen = false;
+    _afterStateChanged();
+  }
+
+  Future<void> _openFinalVoteSheet() async {
+    if (_finalVoteSheetOpen || _pendingFinalVote == null || !mounted) return;
+    _finalVoteSheetOpen = true;
+    final pending = _pendingFinalVote!;
+    final candidates = ((pending['candidates'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>();
+    String? selectedId = candidates.isNotEmpty ? '${candidates.first['id']}' : null;
+    String? selectedClueCode;
+    final reasonController = TextEditingController();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      builder: (sheetContext) => PopScope(
+        canPop: false,
+        child: StatefulBuilder(
+          builder: (sheetContext, setSheetState) {
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  16,
+                  16,
+                  16,
+                  MediaQuery.viewInsetsOf(sheetContext).bottom + 16,
+                ),
+                child: SizedBox(
+                  height: MediaQuery.sizeOf(sheetContext).height * .72,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.how_to_vote_outlined, color: AppTheme.brass),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Text(
+                              '최종 예상 범인 제출',
+                              style: Theme.of(sheetContext).textTheme.titleLarge,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        '탐정이 최종 판단을 내리기 전에, 자신과 탐정을 제외한 용의자 중 가장 의심되는 한 명과 이유를 제출하세요. 남은 비공개 증거를 하나 제안할 수도 있습니다.',
+                      ),
+                      const SizedBox(height: 14),
+                      Expanded(
+                        child: ListView(
+                          children: [
+                            ...candidates.map((candidate) {
+                              final candidateId = '${candidate['id']}';
+                              final selected = candidateId == selectedId;
+                              return ListTile(
+                                leading: Icon(
+                                  selected
+                                      ? Icons.radio_button_checked
+                                      : Icons.radio_button_unchecked,
+                                  color: selected ? AppTheme.brass : null,
+                                ),
+                                title: Text(
+                                  candidate['name'] as String? ?? '용의자',
+                                ),
+                                selected: selected,
+                                onTap: _busy
+                                    ? null
+                                    : () => setSheetState(
+                                          () => selectedId = candidateId,
+                                        ),
+                              );
+                            }),
+                            const SizedBox(height: 8),
+                            TextField(
+                              controller: reasonController,
+                              minLines: 3,
+                              maxLines: 6,
+                              decoration: const InputDecoration(
+                                labelText: '지목 이유',
+                                hintText: '대화, 동선, 공개 증거 등을 근거로 적어 주세요.',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            DropdownButtonFormField<String?>(
+                              initialValue: null,
+                              decoration: const InputDecoration(
+                                labelText: '남은 비공개 증거 제안 (선택)',
+                                border: OutlineInputBorder(),
+                              ),
+                              items: [
+                                const DropdownMenuItem<String?>(
+                                  value: null,
+                                  child: Text('제안하지 않음'),
+                                ),
+                                ..._inventoryItems.map(
+                                  (item) => DropdownMenuItem<String?>(
+                                    value: item['clue_code'] as String?,
+                                    child: Text(
+                                      item['title'] as String? ?? '증거',
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              onChanged: _busy
+                                  ? null
+                                  : (value) => setSheetState(() => selectedClueCode = value),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _busy || selectedId == null
+                              ? null
+                              : () async {
+                                  final reason = reasonController.text.trim();
+                                  if (reason.isEmpty) {
+                                    ScaffoldMessenger.of(sheetContext).showSnackBar(
+                                      const SnackBar(content: Text('지목 이유를 입력해 주세요.')),
+                                    );
+                                    return;
+                                  }
+                                  await _run(
+                                    () => _api.post(
+                                      '/sessions/$_sessionId/final-vote',
+                                      body: {
+                                        'culprit_character_id': selectedId,
+                                        'reasoning': reason,
+                                        if (selectedClueCode != null)
+                                          'clue_code': selectedClueCode,
+                                      },
+                                    ),
+                                  );
+                                  if (sheetContext.mounted && _pendingFinalVote == null) {
+                                    Navigator.pop(sheetContext);
+                                  }
+                                },
+                          icon: const Icon(Icons.how_to_vote_outlined),
+                          label: const Text('최종 의견 제출'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+    reasonController.dispose();
+    _finalVoteSheetOpen = false;
     _afterStateChanged();
   }
 
@@ -1821,15 +2022,28 @@ class _GameScreenState extends State<GameScreen> {
                   Icons.inventory_2_outlined,
                   color: AppTheme.brass,
                 ),
-                title: const Text('라운드 종료 증거 제출 필요'),
+                title: const Text('탐정 취조 전 증거 제출 필요'),
                 subtitle: const Text(
-                  '소지 증거 1개를 탐정에게 제출해야 다음 라운드로 진행됩니다.',
+                  '2·5라운드 비공개 취조 전에 소지 증거 1개를 제출해야 합니다.',
                 ),
                 trailing: TextButton(
                   onPressed: _submissionSheetOpen
                       ? null
                       : _openEvidenceSubmissionSheet,
                   child: const Text('제출'),
+                ),
+              ),
+            ),
+          if (_pendingFinalVote != null && !_completed)
+            Card(
+              margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: ListTile(
+                leading: const Icon(Icons.how_to_vote_outlined, color: AppTheme.brass),
+                title: const Text('최종 예상 범인 제출 필요'),
+                subtitle: const Text('탐정의 최종 선택 전에 당신의 예상 범인과 이유를 제출하세요.'),
+                trailing: TextButton(
+                  onPressed: _finalVoteSheetOpen ? null : _openFinalVoteSheet,
+                  child: const Text('선택'),
                 ),
               ),
             ),
@@ -1911,7 +2125,8 @@ class _GameScreenState extends State<GameScreen> {
           ),
           if (!_completed &&
               _activeConversation == null &&
-              _pendingEvidenceSubmission == null)
+              _pendingEvidenceSubmission == null &&
+              _pendingFinalVote == null)
             _ActionComposer(
               disabled:
                   _busy || (!_isPlayerTurn && _pendingQuestion == null),
@@ -2420,101 +2635,123 @@ class _EndingView extends StatefulWidget {
 }
 
 class _EndingViewState extends State<_EndingView> {
+  bool _detectiveRevealed = false;
   bool _truthRevealed = false;
 
   @override
   Widget build(BuildContext context) {
     final ending = widget.state['ending'] as Map<String, dynamic>?;
     final solution = widget.state['solution'] as Map<String, dynamic>?;
-    final verdict =
-        widget.state['detective_verdict'] as Map<String, dynamic>?;
-    final rawReasoning =
-        (verdict?['reasoning'] as String? ?? '').trim();
-    const genericFallback = '확보한 정보만으로 가장 의심되는 인물을 지목한다.';
-    final clues = ((widget.state['clues'] as List?) ?? const [])
-        .whereType<Map<String, dynamic>>()
-        .toList();
-    final reasoningUnavailable =
-        rawReasoning.isEmpty || rawReasoning == genericFallback;
-    final clueSummary = clues
-        .take(4)
-        .map((clue) => (clue['title'] as String? ?? '').trim())
-        .where((title) => title.isNotEmpty)
-        .join(' · ');
+    final verdict = widget.state['detective_verdict'] as Map<String, dynamic>?;
+    final outcome = widget.state['player_outcome'] as Map<String, dynamic>?;
+    final votes = ((widget.state['suspect_final_votes'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>();
+    final rawReasoning = (verdict?['reasoning'] as String? ?? '').trim();
 
     return ListView(
-      padding: const EdgeInsets.all(22),
+      padding: const EdgeInsets.fromLTRB(20, 22, 20, 42),
       children: [
-        const Icon(Icons.manage_search, size: 68, color: AppTheme.brass),
-        const SizedBox(height: 14),
+        const Icon(Icons.how_to_vote_outlined, size: 62, color: AppTheme.brass),
+        const SizedBox(height: 12),
         Text(
-          '탐정의 최종 수사 결과',
+          '용의자들의 최종 선택',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.headlineMedium,
         ),
+        const SizedBox(height: 6),
+        const Text(
+          '탐정의 최종 지목 전에 각 용의자가 남긴 예상 범인과 이유입니다.',
+          textAlign: TextAlign.center,
+        ),
         const SizedBox(height: 18),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(18),
+        if (votes.isEmpty)
+          const Card(
+            child: Padding(
+              padding: EdgeInsets.all(18),
+              child: Text('정리된 용의자 최종 의견이 없습니다.'),
+            ),
+          )
+        else
+          ...votes.map((vote) {
+            final evidence = vote['suggested_evidence'] as Map<String, dynamic>?;
+            return Card(
+              margin: const EdgeInsets.only(bottom: 10),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '${vote['voter_name'] ?? '용의자'}의 선택',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ),
+                        if (vote['is_player'] == true)
+                          const Chip(label: Text('나')),
+                      ],
+                    ),
+                    const SizedBox(height: 7),
+                    Text(
+                      '예상 범인 · ${vote['accused_name'] ?? '알 수 없음'}',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(vote['reasoning'] as String? ?? ''),
+                    if (evidence != null) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0E1013),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFF2D3036)),
+                        ),
+                        child: Text(
+                          '남은 증거 제안 · ${evidence['title'] ?? '증거'}\n${evidence['content'] ?? ''}',
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          }),
+        const SizedBox(height: 12),
+        if (!_detectiveRevealed)
+          FilledButton.icon(
+            onPressed: () => setState(() => _detectiveRevealed = true),
+            icon: const Icon(Icons.manage_search),
+            label: const Text('탐정의 선택 보기'),
+          ),
+        if (_detectiveRevealed) ...[
+          const SizedBox(height: 18),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20),
+            decoration: BoxDecoration(
+              color: AppTheme.brass.withValues(alpha: .08),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppTheme.brass.withValues(alpha: .30)),
+            ),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  verdict?['detective_name'] as String? ?? '탐정',
-                  style: Theme.of(context).textTheme.labelLarge,
+                  outcome?['label'] as String? ?? '결과',
+                  style: Theme.of(context).textTheme.headlineLarge,
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 5),
                 Text(
-                  '최종 지목: ${verdict?['accused_name'] ?? '알 수 없는 인물'}',
-                  style: Theme.of(context).textTheme.titleLarge,
+                  outcome?['message'] as String? ?? '',
+                  textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 16),
-                Text(
-                  '지목 근거',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 7),
-                if (!reasoningUnavailable)
-                  Text(rawReasoning)
-                else ...[
-                  const Text(
-                    '탐정의 상세 추론 생성에 실패했습니다. '
-                    '지목 당시 확보되어 있던 단서는 아래와 같습니다.',
-                  ),
-                  if (clueSummary.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      clueSummary,
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ],
               ],
             ),
           ),
-        ),
-        const SizedBox(height: 16),
-        if (!_truthRevealed)
-          FilledButton.icon(
-            onPressed: () => setState(() => _truthRevealed = true),
-            icon: const Icon(Icons.visibility_outlined),
-            label: const Text('봉인된 진실 열기'),
-          ),
-        if (_truthRevealed) ...[
-          const SizedBox(height: 10),
-          const Divider(),
           const SizedBox(height: 12),
-          Text(
-            ending?['title'] as String? ?? '사건의 결말',
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-          const SizedBox(height: 10),
-          Text(
-            ending?['ending_text'] as String? ?? '',
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 22),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(18),
@@ -2522,18 +2759,68 @@ class _EndingViewState extends State<_EndingView> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '진짜 사건의 진실',
+                    '탐정의 최종 선택',
                     style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    '실제 범인: ${solution?['culprit_name'] ?? '알 수 없음'}',
-                    style: Theme.of(context).textTheme.titleMedium,
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    solution?['canonical_explanation'] as String? ?? '',
+                    '${verdict?['detective_name'] ?? '탐정'}의 최종 지목 · ${verdict?['accused_name'] ?? '알 수 없는 인물'}',
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
+                  const SizedBox(height: 14),
+                  Text(
+                    '판단 근거',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    rawReasoning.isEmpty
+                        ? '탐정의 상세 판단 근거를 불러오지 못했습니다.'
+                        : rawReasoning,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (!_truthRevealed)
+            FilledButton.icon(
+              onPressed: () => setState(() => _truthRevealed = true),
+              icon: const Icon(Icons.visibility_outlined),
+              label: const Text('사건의 진실 보기'),
+            ),
+        ],
+        if (_truthRevealed) ...[
+          const SizedBox(height: 18),
+          const Divider(),
+          const SizedBox(height: 12),
+          Text(
+            '사건의 진실',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.headlineSmall,
+          ),
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '실제 범인 · ${solution?['culprit_name'] ?? '알 수 없음'}',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(solution?['canonical_explanation'] as String? ?? ''),
+                  if ((ending?['ending_text'] as String? ?? '').isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    Text(
+                      ending?['title'] as String? ?? '사건의 결말',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(ending?['ending_text'] as String? ?? ''),
+                  ],
                 ],
               ),
             ),
