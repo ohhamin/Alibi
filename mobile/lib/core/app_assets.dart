@@ -7,6 +7,8 @@ class AppAssets {
   static const characterSheet = 'assets/images/sheets/characters_sheet.webp';
   static const locationSheet = 'assets/images/sheets/locations_sheet.webp';
   static const evidenceSheet = 'assets/images/sheets/evidence_sheet.webp';
+  static const evidenceExtraSheet =
+      'assets/images/sheets/evidence_extra_sheet.webp';
 
   // Kept for compatibility with older story/UI code that may still request
   // individual files. New in-game rendering uses the high-resolution sheets.
