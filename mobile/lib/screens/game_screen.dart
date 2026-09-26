@@ -22,6 +22,8 @@ class _GameScreenState extends State<GameScreen> {
   late Map<String, dynamic> _state;
   bool _busy = false;
   bool _autoAdvanceScheduled = false;
+  int _autoAdvanceFailures = 0;
+  bool _autoAdvancePaused = false;
   bool _conversationSheetOpen = false;
   bool _conversationMinimized = false;
   bool _submissionSheetOpen = false;
@@ -100,13 +102,50 @@ class _GameScreenState extends State<GameScreen> {
     super.dispose();
   }
 
-  Future<void> _run(Future<Map<String, dynamic>> Function() action) async {
-    if (_busy) return;
+  Future<bool> _run(
+    Future<Map<String, dynamic>> Function() action, {
+    bool autoAdvance = false,
+  }) async {
+    if (_busy) return false;
     setState(() => _busy = true);
+    var success = false;
     try {
       final result = await action();
+      success = true;
       if (mounted) {
-        setState(() => _state = result);
+        setState(() {
+          _state = result;
+          if (autoAdvance) {
+            _autoAdvanceFailures = 0;
+            _autoAdvancePaused = false;
+          }
+        });
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        if (autoAdvance && e.isTransient) {
+          setState(() {
+            _autoAdvanceFailures += 1;
+            if (_autoAdvanceFailures >= 3) {
+              _autoAdvancePaused = true;
+            }
+          });
+          if (_autoAdvanceFailures == 1 || _autoAdvancePaused) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  _autoAdvancePaused
+                      ? '서버 연결이 불안정해 자동 진행을 멈췄습니다.'
+                      : e.message,
+                ),
+              ),
+            );
+          }
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(e.message)),
+          );
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -120,6 +159,16 @@ class _GameScreenState extends State<GameScreen> {
         _afterStateChanged();
       }
     }
+    return success;
+  }
+
+  void _retryAutoAdvance() {
+    if (_busy) return;
+    setState(() {
+      _autoAdvanceFailures = 0;
+      _autoAdvancePaused = false;
+    });
+    _afterStateChanged();
   }
 
   void _afterStateChanged() {
@@ -154,10 +203,16 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     if (_pendingQuestion != null || _pendingEvidenceSubmission != null) return;
+    if (_autoAdvancePaused) return;
 
     if (_currentActorId != _playerCharacterId && !_autoAdvanceScheduled) {
       _autoAdvanceScheduled = true;
-      Future<void>.delayed(const Duration(milliseconds: 140), () async {
+      final delay = _autoAdvanceFailures <= 0
+          ? const Duration(milliseconds: 220)
+          : _autoAdvanceFailures == 1
+              ? const Duration(seconds: 1)
+              : const Duration(seconds: 3);
+      Future<void>.delayed(delay, () async {
         _autoAdvanceScheduled = false;
         if (!mounted ||
             _busy ||
@@ -171,6 +226,7 @@ class _GameScreenState extends State<GameScreen> {
         }
         await _run(
           () => _api.post('/sessions/$_sessionId/advance'),
+          autoAdvance: true,
         );
       });
     }
@@ -1815,6 +1871,24 @@ class _GameScreenState extends State<GameScreen> {
                           await _openConversationSheet();
                         },
                   child: const Text('대화로 돌아가기'),
+                ),
+              ),
+            ),
+          if (_autoAdvancePaused && !_completed)
+            Card(
+              margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: ListTile(
+                leading: const Icon(
+                  Icons.cloud_off_outlined,
+                  color: AppTheme.brass,
+                ),
+                title: const Text('서버 연결이 불안정합니다'),
+                subtitle: const Text(
+                  '자동 진행을 잠시 멈췄습니다. 네트워크를 확인한 뒤 다시 시도하세요.',
+                ),
+                trailing: TextButton(
+                  onPressed: _busy ? null : _retryAutoAdvance,
+                  child: const Text('다시 연결'),
                 ),
               ),
             ),
