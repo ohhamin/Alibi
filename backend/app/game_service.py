@@ -2901,20 +2901,26 @@ class GameService:
                 and str(row['id']) != str(actor['id'])
             ]
 
+        is_detective = actor['role_label'] == '탐정' or actor['code'] == 'kang-haejin'
+        memory_char_limit = 650 if is_detective else 280
+        memory_limit = 5 if is_detective else 2
         await cur.execute(
             """
-            select left(content, 650) as content
+            select left(content, %s) as content
             from game_private.agent_memories
             where session_id = %s and character_id = %s
             order by created_at desc
-            limit 5
+            limit %s
             """,
-            (session['id'], actor['id']),
+            (memory_char_limit, session['id'], actor['id'], memory_limit),
         )
         memories = [row['content'] for row in await cur.fetchall()]
         memories.reverse()
 
-        is_detective = actor['role_label'] == '탐정' or actor['code'] == 'kang-haejin'
+        known_facts = _as_list(actor['known_facts'])
+        if not is_detective and len(known_facts) > 5:
+            known_facts = [*known_facts[:2], *known_facts[-3:]]
+
         choice = await self.agent_service.choose_npc_action(
             NpcActionContext(
                 world_prompt=actor['world_prompt'],
@@ -2927,7 +2933,7 @@ class GameService:
                 current_location_name=loc['player_name'],
                 adjacent_locations=adjacent_locations,
                 same_room_characters=same_room,
-                known_facts=_as_list(actor['known_facts']),
+                known_facts=known_facts,
                 memories=memories,
                 is_detective=is_detective,
             )
