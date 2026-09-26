@@ -10,6 +10,7 @@ from psycopg.types.json import Jsonb
 
 from .db import pool
 from .game_service import GameService, _as_dict, _as_list
+from .story_events import run_story_events
 from .schemas import FinalVoteRequest, StartSessionRequest
 
 
@@ -43,6 +44,18 @@ class EnhancedGameService(GameService):
                         await self._ensure_social_state(
                             cur,
                             row['story_version_id'],
+                            state,
+                        )
+                        await run_story_events(
+                            self,
+                            cur,
+                            {
+                                'id': session_id,
+                                'story_version_id': row['story_version_id'],
+                                'player_character_id': row['player_character_id'],
+                                'current_turn': int(session.get('current_turn') or 1),
+                            },
+                            None,
                             state,
                         )
                         await cur.execute(
@@ -330,6 +343,30 @@ class EnhancedGameService(GameService):
             payload={'question': actual, 'fingerprint': fingerprint},
         )
 
+    async def _handle_free_action(
+        self,
+        cur,
+        session,
+        turn,
+        state,
+        request,
+        client_action_id: str,
+        *,
+        action_text: str,
+    ) -> bool:
+        consumed = await super()._handle_free_action(
+            cur,
+            session,
+            turn,
+            state,
+            request,
+            client_action_id,
+            action_text=action_text,
+        )
+        if consumed:
+            await run_story_events(self, cur, session, turn, state)
+        return consumed
+
     async def _continue_conversation(
         self,
         cur,
@@ -394,6 +431,7 @@ class EnhancedGameService(GameService):
         )
         if clue is None:
             return None
+        await run_story_events(self, cur, session, turn, state)
         await self._ensure_social_state(cur, session['story_version_id'], state)
         await cur.execute(
             "select metadata from game_private.story_clues "
@@ -705,6 +743,7 @@ class EnhancedGameService(GameService):
         max_rounds = int(state.get('max_rounds', 6))
         if current_round < max_rounds:
             await super()._advance_round(cur, session, turn, state)
+            await run_story_events(self, cur, session, turn, state)
             return
 
         if not await self._prepare_round_end_submissions(cur, session, turn, state):
