@@ -1466,13 +1466,14 @@ class GameService:
             )
             result_text = '현장을 의도한 모습으로 연출했다. 다른 인물이 보면 이 행동 자체를 기억할 수 있다.'
 
-        narration = await self.agent_service.narrate_game_action(
-            ctx,
-            allowed=True,
-            result_text=result_text,
-        )
         await self._insert_message(
-            cur, session['id'], turn['id'], 'narrator', None, 'choice_result', narration
+            cur,
+            session['id'],
+            turn['id'],
+            'narrator',
+            None,
+            'choice_result',
+            result_text,
         )
 
         await self._record_witnesses(
@@ -1596,9 +1597,11 @@ class GameService:
             raise HTTPException(status_code=400, detail='대화 상대 정보를 찾을 수 없습니다.')
         await cur.execute(
             """
-            select content from game_private.agent_memories
+            select left(content, 700) as content
+            from game_private.agent_memories
             where session_id = %s and character_id = %s
-            order by created_at desc limit 10
+            order by created_at desc
+            limit 6
             """,
             (session['id'], character_id),
         )
@@ -2394,40 +2397,23 @@ class GameService:
             if await cur.fetchone():
                 continue
 
-            questions = [
-                question,
-                (
-                    "방금 진술한 시간대와 행동을 뒷받침할 근거가 있습니까? "
-                    "지금까지 공개된 증거와 어긋날 수 있는 부분이 있다면 직접 설명해 주세요."
-                ),
-                (
-                    "마지막 질문입니다. 현재 가장 의심하는 사람과 그 이유를 말해 주세요. "
-                    "본인에게 불리해서 말하지 않은 사실이 있다면 지금 설명할 기회입니다."
-                ),
-            ]
-            transcript_lines = [f"{suspect['display_name']} 비공개 취조"]
-            previous_reply = ''
-            for exchange_no, private_question in enumerate(questions, start=1):
-                contextual_question = private_question
-                if previous_reply:
-                    contextual_question = (
-                        f"앞선 답변은 '{previous_reply}'였다. "
-                        f"{private_question}"
-                    )
-                target_ctx = await self._agent_context_for_character(
-                    cur, session, suspect_id, contextual_question
-                )
-                target_ctx.player_name = detective['display_name']
-                reply = await self.agent_service.generate_reply(target_ctx)
-                transcript_lines.append(
-                    f"탐정({exchange_no}/3): {private_question}"
-                )
-                transcript_lines.append(
-                    f"{suspect['display_name']}: {reply}"
-                )
-                previous_reply = reply
-
-            transcript = "\n".join(transcript_lines)
+            compact_question = (
+                f"{question} "
+                "한 번의 답변 안에 다음 세 가지를 함께 말하세요: "
+                "① 본인의 시간대별 동선과 근거, "
+                "② 공개 증거와 충돌하거나 해명할 점, "
+                "③ 현재 의심하는 사람과 이유 및 본인에게 불리한 사실이 있다면 그 설명."
+            )
+            target_ctx = await self._agent_context_for_character(
+                cur, session, suspect_id, compact_question
+            )
+            target_ctx.player_name = detective['display_name']
+            reply = await self.agent_service.generate_reply(target_ctx)
+            transcript = (
+                f"{suspect['display_name']} 비공개 취조\n"
+                f"탐정: {compact_question}\n"
+                f"{suspect['display_name']}: {reply}"
+            )
             await self._remember(
                 cur,
                 session['id'],
@@ -2847,11 +2833,11 @@ class GameService:
 
         await cur.execute(
             """
-            select content
+            select left(content, 650) as content
             from game_private.agent_memories
             where session_id = %s and character_id = %s
             order by created_at desc
-            limit 8
+            limit 5
             """,
             (session['id'], actor['id']),
         )
@@ -3645,10 +3631,11 @@ class GameService:
 
         await cur.execute(
             """
-            select content
+            select left(content, 800) as content
             from game_private.agent_memories
             where session_id = %s and character_id = %s
-            order by created_at
+            order by salience desc, created_at desc
+            limit 18
             """,
             (session['id'], detective['id']),
         )
