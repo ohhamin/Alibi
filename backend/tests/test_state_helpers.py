@@ -1,5 +1,7 @@
 from app.game_service import _as_dict, _as_list
 
+# CI trigger: verify final social/voting and duplicate-question backend source.
+
 
 def test_as_dict_is_safe():
     assert _as_dict({'round': 1}) == {'round': 1}
