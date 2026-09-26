@@ -1,0 +1,43 @@
+name: Apply NPC duplicate-question guard
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'backend/tool/apply_npc_player_question_dedupe.py'
+      - '.github/workflows/apply-npc-dedupe-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Patch source
+        run: |
+          python backend/tool/apply_npc_player_question_dedupe.py
+          git diff --check
+          python -m compileall -q backend/app
+
+      - name: Commit patched source
+        run: |
+          if git diff --quiet -- backend/app/game_service.py; then
+            echo 'No source changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add backend/app/game_service.py
+          git commit -m 'Block repeated NPC alibi questions to player'
+          git push origin HEAD:master
