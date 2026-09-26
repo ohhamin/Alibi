@@ -1,92 +1,22 @@
 from pathlib import Path
 
-path = Path(__file__).resolve().parents[1] / 'lib' / 'screens' / 'game_screen.dart'
-text = path.read_text()
+root = Path(__file__).resolve().parents[2]
+mobile_path = root / 'mobile' / 'lib' / 'screens' / 'game_screen.dart'
+backend_path = root / 'backend' / 'app' / 'game_service.py'
 
-start_marker = 'class _MessageTimeline extends StatelessWidget {'
-end_marker = 'class _ActionComposer extends StatelessWidget {'
 
-if 'class _MessageTimeline extends StatefulWidget {' in text:
-    print('round timeline already applied')
-    raise SystemExit(0)
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    if old in text:
+        return text.replace(old, new, 1)
+    if new in text:
+        return text
+    raise SystemExit(f'patch anchor not found: {label}')
 
-start = text.find(start_marker)
-end = text.find(end_marker)
-if start < 0 or end < 0 or end <= start:
-    raise SystemExit('message timeline anchors not found')
 
-replacement = r'''class _MessageTimeline extends StatefulWidget {
-  const _MessageTimeline({
-    required this.messages,
-    required this.characters,
-    required this.playerCharacterId,
-  });
+# --- Mobile: readable timeline -------------------------------------------------
+text = mobile_path.read_text()
 
-  final List<Map<String, dynamic>> messages;
-  final List<Map<String, dynamic>> characters;
-  final String? playerCharacterId;
-
-  @override
-  State<_MessageTimeline> createState() => _MessageTimelineState();
-}
-
-class _MessageTimelineState extends State<_MessageTimeline> {
-  final ScrollController _scrollController = ScrollController();
-  bool _stickToBottom = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _scrollController.addListener(_trackScrollPosition);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
-  }
-
-  @override
-  void didUpdateWidget(covariant _MessageTimeline oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.messages.length != oldWidget.messages.length && _stickToBottom) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
-    }
-  }
-
-  @override
-  void dispose() {
-    _scrollController
-      ..removeListener(_trackScrollPosition)
-      ..dispose();
-    super.dispose();
-  }
-
-  void _trackScrollPosition() {
-    if (!_scrollController.hasClients) return;
-    final position = _scrollController.position;
-    _stickToBottom = position.maxScrollExtent - position.pixels <= 96;
-  }
-
-  void _jumpToBottom() {
-    if (!mounted || !_scrollController.hasClients) return;
-    _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-    _stickToBottom = true;
-  }
-
-  void _scrollToBottom() {
-    if (!mounted || !_scrollController.hasClients) return;
-    _scrollController.animateTo(
-      _scrollController.position.maxScrollExtent,
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOutCubic,
-    );
-  }
-
-  Map<String, dynamic>? _character(String? id) {
-    if (id == null) return null;
-    for (final character in widget.characters) {
-      if ('${character['id']}' == id) return character;
-    }
-    return null;
-  }
-
-  List<Map<String, dynamic>> _timelineEntries() {
+old_timeline = r'''  List<Map<String, dynamic>> _timelineEntries() {
     final entries = <Map<String, dynamic>>[];
     String? previousTurnId;
     var roundNo = 0;
@@ -105,41 +35,90 @@ class _MessageTimelineState extends State<_MessageTimeline> {
     }
     return entries;
   }
+'''
+new_timeline = r'''  bool _startsAction(Map<String, dynamic> message, bool inDialogue) {
+    final speakerType = message['speaker_type'] as String? ?? 'system';
+    final kind = message['message_kind'] as String? ?? '';
+    if (kind == 'dialogue') return !inDialogue;
+    if (speakerType == 'player' || speakerType == 'character') {
+      return kind == 'choice_result' || kind == 'npc_action';
+    }
+    return false;
+  }
 
-  Widget _roundHeader(BuildContext context, int roundNo) {
+  List<Map<String, dynamic>> _timelineEntries() {
+    final entries = <Map<String, dynamic>>[];
+    String? previousTurnId;
+    var roundNo = 0;
+    var hasAction = false;
+    var inDialogue = false;
+
+    for (final message in widget.messages) {
+      final turnId = '${message['turn_id'] ?? ''}';
+      if (roundNo == 0 || turnId != previousTurnId) {
+        roundNo += 1;
+        entries.add(<String, dynamic>{
+          '_type': 'round_header',
+          'round_no': roundNo,
+        });
+        previousTurnId = turnId;
+        hasAction = false;
+        inDialogue = false;
+      }
+
+      final kind = message['message_kind'] as String? ?? '';
+      final startsAction = _startsAction(message, inDialogue);
+      if (startsAction && hasAction) {
+        entries.add(const <String, dynamic>{'_type': 'action_divider'});
+      }
+      if (startsAction) hasAction = true;
+      entries.add(message);
+
+      if (kind == 'dialogue') {
+        inDialogue = true;
+      } else if ((message['speaker_type'] as String?) == 'player' ||
+          (message['speaker_type'] as String?) == 'character' ||
+          (message['speaker_type'] as String?) == 'system') {
+        inDialogue = false;
+      }
+    }
+    return entries;
+  }
+'''
+text = replace_once(text, old_timeline, new_timeline, 'timeline grouping')
+
+message_anchor = "  Widget _message(BuildContext context, Map<String, dynamic> item) {\n"
+action_divider = r'''  Widget _actionDivider() {
     return Padding(
-      padding: EdgeInsets.only(
-        top: roundNo == 1 ? 8 : 22,
-        bottom: 9,
-      ),
-      child: Row(
-        children: [
-          const Expanded(child: Divider(color: Color(0xFF30333A))),
-          Container(
-            margin: const EdgeInsets.symmetric(horizontal: 10),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: const Color(0xFF171A1F),
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(
-                color: AppTheme.brass.withValues(alpha: .38),
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          const dashWidth = 5.0;
+          const gap = 5.0;
+          final count = (constraints.maxWidth / (dashWidth + gap)).floor();
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: List.generate(
+              count,
+              (_) => Container(
+                width: dashWidth,
+                height: 1,
+                color: const Color(0xFF393D45),
               ),
             ),
-            child: Text(
-              '라운드 $roundNo',
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: AppTheme.brass,
-                    fontWeight: FontWeight.w800,
-                  ),
-            ),
-          ),
-          const Expanded(child: Divider(color: Color(0xFF30333A))),
-        ],
+          );
+        },
       ),
     );
   }
 
-  Widget _message(BuildContext context, Map<String, dynamic> item) {
+'''
+if action_divider not in text:
+    if message_anchor not in text:
+        raise SystemExit('patch anchor not found: message renderer')
+    text = text.replace(message_anchor, action_divider + message_anchor, 1)
+
+old_message_head = r'''  Widget _message(BuildContext context, Map<String, dynamic> item) {
     final type = item['speaker_type'] as String? ?? 'system';
     final isPlayer = type == 'player';
     final isNarration = type == 'narrator' || type == 'system';
@@ -151,31 +130,49 @@ class _MessageTimelineState extends State<_MessageTimeline> {
                 : '나');
 
     if (isNarration) {
+'''
+new_message_head = r'''  Widget _message(BuildContext context, Map<String, dynamic> item) {
+    final type = item['speaker_type'] as String? ?? 'system';
+    final isPlayer = type == 'player';
+    final isNarration = type == 'narrator';
+
+    if (type == 'system') {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 7),
         child: Container(
-          padding: const EdgeInsets.fromLTRB(12, 11, 14, 11),
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(13, 11, 13, 11),
           decoration: BoxDecoration(
-            color: const Color(0xFF111317),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: const Color(0xFF2B2E34)),
+            color: AppTheme.brass.withValues(alpha: .07),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: AppTheme.brass.withValues(alpha: .24),
+            ),
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Padding(
-                padding: EdgeInsets.only(top: 2),
-                child: Icon(
-                  Icons.notes_rounded,
-                  size: 17,
-                  color: AppTheme.brass,
-                ),
+              const Icon(
+                Icons.campaign_outlined,
+                size: 17,
+                color: AppTheme.brass,
               ),
               const SizedBox(width: 9),
               Expanded(
-                child: Text(
-                  item['content'] as String? ?? '',
-                  style: Theme.of(context).textTheme.bodyMedium,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'SYSTEM',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: AppTheme.brass,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 1.1,
+                          ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(item['content'] as String? ?? ''),
+                  ],
                 ),
               ),
             ],
@@ -184,104 +181,56 @@ class _MessageTimelineState extends State<_MessageTimeline> {
       );
     }
 
-    final speakerId = item['speaker_character_id'] as String? ??
-        (isPlayer ? widget.playerCharacterId : null);
-    final character = _character(speakerId);
-    final avatarName =
-        character?['display_name'] as String? ?? (isPlayer ? '나' : speaker);
-    final avatarCode = character?['code'] as String?;
-    final bubble = Container(
-      constraints: const BoxConstraints(maxWidth: 300),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: isPlayer
-            ? AppTheme.brass.withValues(alpha: .10)
-            : const Color(0xFF171A1F),
-        borderRadius: BorderRadius.only(
-          topLeft: const Radius.circular(12),
-          topRight: const Radius.circular(12),
-          bottomLeft: Radius.circular(isPlayer ? 12 : 3),
-          bottomRight: Radius.circular(isPlayer ? 3 : 12),
-        ),
-        border: Border.all(
-          color: isPlayer
-              ? AppTheme.brass.withValues(alpha: .28)
-              : const Color(0xFF30333A),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment:
-            isPlayer ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-        children: [
-          Text(
-            speaker,
-            style: Theme.of(context).textTheme.labelMedium,
-          ),
-          const SizedBox(height: 4),
-          Text(item['content'] as String? ?? ''),
-        ],
-      ),
-    );
+    final speaker = item['speaker_name'] as String? ??
+        (type == 'narrator' ? '게임 마스터' : '나');
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        mainAxisAlignment:
-            isPlayer ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: isPlayer
-            ? [
-                Flexible(child: bubble),
-                const SizedBox(width: 8),
-                PixelAvatar(
-                  name: avatarName,
-                  code: avatarCode,
-                  size: 38,
-                ),
-              ]
-            : [
-                PixelAvatar(
-                  name: avatarName,
-                  code: avatarCode,
-                  size: 38,
-                ),
-                const SizedBox(width: 8),
-                Flexible(child: bubble),
-              ],
-      ),
-    );
-  }
+    if (isNarration) {
+'''
+text = replace_once(text, old_message_head, new_message_head, 'system notice style')
 
-  @override
-  Widget build(BuildContext context) {
-    if (widget.messages.isEmpty) {
-      return const Center(child: Text('사건 기록을 불러오는 중입니다.'));
-    }
-
-    final entries = _timelineEntries();
-    final bottomSafeArea = MediaQuery.viewPaddingOf(context).bottom;
-    return ListView.builder(
-      controller: _scrollController,
-      padding: EdgeInsets.fromLTRB(
-        14,
-        4,
-        14,
-        bottomSafeArea + 72,
-      ),
-      itemCount: entries.length,
-      itemBuilder: (context, index) {
-        final entry = entries[index];
-        if (entry['_type'] == 'round_header') {
+old_builder = r'''        if (entry['_type'] == 'round_header') {
           return _roundHeader(context, entry['round_no'] as int);
         }
         return _message(context, entry);
-      },
-    );
-  }
-}
-
 '''
+new_builder = r'''        if (entry['_type'] == 'round_header') {
+          return _roundHeader(context, entry['round_no'] as int);
+        }
+        if (entry['_type'] == 'action_divider') {
+          return _actionDivider();
+        }
+        return _message(context, entry);
+'''
+text = replace_once(text, old_builder, new_builder, 'action divider rendering')
+mobile_path.write_text(text)
 
-text = text[:start] + replacement + text[end:]
-path.write_text(text)
-print('patched', path)
+
+# --- Backend: preserve the NPC as the visible speaker --------------------------
+text = backend_path.read_text()
+backend_replacements = [
+    (
+        """            if player_location in {origin_code, move_to}:\n                await self._insert_message(\n                    cur, session['id'], turn['id'], 'narrator', None, 'narration', exact_move\n                )\n""",
+        """            if player_location in {origin_code, move_to}:\n                await self._insert_message(\n                    cur,\n                    session['id'],\n                    turn['id'],\n                    'character',\n                    actor['id'],\n                    'npc_action',\n                    exact_move,\n                )\n""",
+        'npc move message',
+    ),
+    (
+        """        await self._insert_message(\n            cur, session['id'], turn['id'], 'narrator', None, 'narration',\n            content if player_location == current_code else f\"{actor['display_name']}이(가) 행동을 했다.\",\n        )\n""",
+        """        await self._insert_message(\n            cur,\n            session['id'],\n            turn['id'],\n            'character',\n            actor['id'],\n            'npc_action',\n            content if player_location == current_code\n            else f\"{actor['display_name']}이(가) 행동을 했다.\",\n        )\n""",
+        'npc observe message',
+    ),
+    (
+        """        await self._insert_message(\n            cur,\n            session['id'],\n            turn['id'],\n            'narrator',\n            None,\n            'narration',\n            exchange if state.get('current_location') == location_code\n            else f\"{actor['display_name']}이(가) 행동을 했다.\",\n        )\n""",
+        """        if state.get('current_location') == location_code:\n            await self._insert_message(\n                cur,\n                session['id'],\n                turn['id'],\n                'character',\n                actor['id'],\n                'dialogue',\n                actual_question,\n            )\n            await self._insert_message(\n                cur,\n                session['id'],\n                turn['id'],\n                'character',\n                target_id,\n                'dialogue',\n                reply,\n            )\n        else:\n            await self._insert_message(\n                cur,\n                session['id'],\n                turn['id'],\n                'character',\n                actor['id'],\n                'npc_action',\n                f\"{actor['display_name']}이(가) 행동을 했다.\",\n            )\n""",
+        'npc to npc dialogue',
+    ),
+    (
+        """        await self._insert_message(\n            cur,\n            session['id'],\n            turn['id'],\n            'narrator',\n            None,\n            'narration',\n            public_observation if state.get('current_location') == location_code\n            else f\"{actor['display_name']}이(가) 행동을 했다.\",\n        )\n""",
+        """        await self._insert_message(\n            cur,\n            session['id'],\n            turn['id'],\n            'character',\n            actor['id'],\n            'npc_action',\n            public_observation if state.get('current_location') == location_code\n            else f\"{actor['display_name']}이(가) 행동을 했다.\",\n        )\n""",
+        'npc investigate message',
+    ),
+]
+for old, new, label in backend_replacements:
+    text = replace_once(text, old, new, label)
+backend_path.write_text(text)
+
+print('patched readable timeline and NPC chat source')
