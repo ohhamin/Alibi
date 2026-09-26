@@ -1,0 +1,39 @@
+name: Apply turn and detective fixes
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'backend/tool/apply_turn_detective_fixes.py'
+      - '.github/workflows/apply-turn-detective-fixes.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply source fixes
+        run: |
+          python backend/tool/apply_turn_detective_fixes.py
+          python -m py_compile backend/app/agent_service.py backend/app/game_service.py
+          git diff --check
+
+      - name: Commit patched source
+        run: |
+          if git diff --quiet -- mobile/lib/screens/game_screen.dart backend/app/game_service.py backend/app/agent_service.py; then
+            echo 'No source changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mobile/lib/screens/game_screen.dart backend/app/game_service.py backend/app/agent_service.py
+          git commit -m 'Fix round reset detective divider and dialogue fallback'
+          git push origin HEAD:master
