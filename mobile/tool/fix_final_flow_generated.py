@@ -11,6 +11,22 @@ unused = """  List<Map<String, dynamic>> get _suspectFinalVotes =>
 """
 text = text.replace(unused, '')
 
+getter = """  Map<String, dynamic>? get _pendingFinalVote =>
+      _state['pending_final_vote'] as Map<String, dynamic>?;
+"""
+while text.count(getter) > 1:
+    first = text.find(getter)
+    second = text.find(getter, first + len(getter))
+    text = text[:first] + text[first + len(getter):]
+
+method_marker = "  Future<void> _openFinalVoteSheet() async {\n"
+while text.count(method_marker) > 1:
+    first = text.find(method_marker)
+    second = text.find(method_marker, first + len(method_marker))
+    # The duplicate methods are adjacent; removing everything up to the next
+    # marker leaves exactly one implementation.
+    text = text[:first] + text[second:]
+
 old_selector = """                            ...candidates.map(
                               (candidate) => RadioListTile<String>(
                                 value: '${candidate['id']}',
@@ -79,8 +95,7 @@ new_body = """                                      body: {
                                         'clue_code': ?selectedClueCode,
                                       },
 """
-if old_body in text:
-    text = text.replace(old_body, new_body, 1)
+text = text.replace(old_body, new_body)
 
 path.write_text(text)
 print('fixed', path)
