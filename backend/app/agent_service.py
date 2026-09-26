@@ -163,8 +163,16 @@ class AgentService:
         ctx: ConversationReplyContext,
     ) -> dict[str, Any]:
         agent = ctx.agent
+        if ctx.presented_item:
+            item_title = str(ctx.presented_item.get('title') or ctx.presented_item.get('name') or '이 증거')
+            fallback_reply = (
+                f"'{item_title}'은 확인했습니다. 이 증거가 직접 보여주는 사실을 "
+                '기존 진술과 시간대에 맞춰 비교해보겠습니다.'
+            )
+        else:
+            fallback_reply = self._fallback_reply(agent)
         fallback = {
-            'reply': self._fallback_reply(agent),
+            'reply': fallback_reply,
             'end_conversation': ctx.exchange_no >= ctx.max_exchanges,
         }
         if self.client is None:
@@ -223,7 +231,10 @@ class AgentService:
             end = raw.rfind('}')
             if start >= 0 and end > start:
                 raw = raw[start:end + 1]
-            parsed = json.loads(raw)
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
             if isinstance(parsed, dict):
                 reply = str(parsed.get('reply') or '').strip()
                 if reply:
@@ -232,8 +243,14 @@ class AgentService:
                         'end_conversation': bool(parsed.get('end_conversation'))
                         or ctx.exchange_no >= ctx.max_exchanges,
                     }
-        except (OpenAIError, json.JSONDecodeError, TypeError, ValueError):
-            logger.warning('OpenAI conversation response failed; using fallback')
+            plain = raw.strip().strip('`').strip()
+            if plain and not plain.startswith('{'):
+                return {
+                    'reply': plain[:700],
+                    'end_conversation': ctx.exchange_no >= ctx.max_exchanges,
+                }
+        except (OpenAIError, TypeError, ValueError) as exc:
+            logger.warning('OpenAI conversation response failed; using fallback: %s', exc)
         return fallback
     async def interpret_game_action(self, ctx: GameMasterContext) -> dict[str, Any]:
         fallback = {

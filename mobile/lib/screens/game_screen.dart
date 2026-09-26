@@ -89,10 +89,21 @@ class _GameScreenState extends State<GameScreen> {
       _pendingEvidenceSubmission == null &&
       _pendingFinalVote == null &&
       _currentActorId == _playerCharacterId;
-  int get _movementRemaining =>
-      (_publicState['movement_remaining'] as num?)?.toInt() ?? 0;
-  int get _actionsRemaining =>
-      (_publicState['actions_remaining'] as num?)?.toInt() ?? 0;
+  int get _movementRemaining {
+    final raw = (_publicState['movement_remaining'] as num?)?.toInt() ?? 0;
+    if (_isPlayerTurn && raw <= 0 && _actionsRemaining > 0) return 1;
+    return raw;
+  }
+
+  int get _actionsRemaining {
+    final raw = (_publicState['actions_remaining'] as num?)?.toInt() ?? 0;
+    if (_isPlayerTurn && raw <= 0) {
+      final roundActions = (_publicState['round_actor_actions'] as Map?) ?? const {};
+      final completed = (roundActions[_playerCharacterId] as num?)?.toInt() ?? 0;
+      if (completed < 2) return 2 - completed;
+    }
+    return raw;
+  }
 
   @override
   void initState() {
@@ -2554,9 +2565,16 @@ class _MessageTimelineState extends State<_MessageTimeline> {
   bool _startsAction(Map<String, dynamic> message, bool inDialogue) {
     final speakerType = message['speaker_type'] as String? ?? 'system';
     final kind = message['message_kind'] as String? ?? '';
+    final content = message['content'] as String? ?? '';
     if (kind == 'dialogue') return !inDialogue;
     if (speakerType == 'player' || speakerType == 'character') {
       return kind == 'choice_result' || kind == 'npc_action';
+    }
+    if (speakerType == 'system' &&
+        (content.startsWith('[공개 증거] 탐정이') ||
+         content.contains('탐정이 추가 수사') ||
+         content.contains('탐정이 공개 질문'))) {
+      return true;
     }
     return false;
   }

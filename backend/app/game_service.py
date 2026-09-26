@@ -2853,6 +2853,12 @@ class GameService:
         )
         state['current_actor_id'] = actor_id
         state['current_actor_name'] = _as_dict(turn_info).get('name')
+        if actor_id == str(session.get('player_character_id') or ''):
+            counts = _as_dict(state.get('round_actor_actions'))
+            completed = int(counts.get(actor_id, 0) or 0)
+            remaining = max(0, 2 - completed)
+            state['actions_remaining'] = remaining
+            state['movement_remaining'] = 1 if remaining > 0 else 0
 
     async def _run_single_npc_turn(self, cur, session, turn, state, actor_id: str) -> None:
         await cur.execute(
