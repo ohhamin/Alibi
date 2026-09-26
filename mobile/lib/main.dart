@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import 'core/app_assets.dart';
 import 'core/app_config.dart';
 import 'core/app_theme.dart';
 import 'screens/home_screen.dart';
@@ -58,16 +57,20 @@ class _SplashGateState extends State<SplashGate> {
       switchOutCurve: Curves.easeIn,
       child: _ready
           ? const AuthGate(key: ValueKey('auth'))
-          : Scaffold(
-              key: const ValueKey('splash'),
-              backgroundColor: const Color(0xFF08090A),
-              body: SizedBox.expand(
-                child: Image.asset(
-                  AppAssets.loading,
-                  fit: BoxFit.cover,
-                  filterQuality: FilterQuality.high,
-                  errorBuilder: (_, _, _) => const Center(
-                    child: Text(
+          : const Scaffold(
+              key: ValueKey('splash'),
+              backgroundColor: Color(0xFF08090A),
+              body: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.fingerprint,
+                      size: 54,
+                      color: AppTheme.brass,
+                    ),
+                    SizedBox(height: 18),
+                    Text(
                       'ALIBI',
                       style: TextStyle(
                         fontSize: 34,
@@ -75,7 +78,23 @@ class _SplashGateState extends State<SplashGate> {
                         letterSpacing: 8,
                       ),
                     ),
-                  ),
+                    SizedBox(height: 10),
+                    Text(
+                      'CASE FILE INITIALIZING',
+                      style: TextStyle(
+                        color: AppTheme.muted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.8,
+                      ),
+                    ),
+                    SizedBox(height: 22),
+                    SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ],
                 ),
               ),
             ),
