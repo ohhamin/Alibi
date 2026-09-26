@@ -5,7 +5,6 @@ on:
     branches:
       - master
     paths:
-      - 'mobile/tool/apply_final_flow_patch.py'
       - 'mobile/tool/fix_final_flow_generated.py'
       - '.github/workflows/apply-final-flow-source.yml'
   workflow_dispatch:
@@ -21,13 +20,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Patch game screen source
+      - name: Clean final flow source
         run: |
-          python mobile/tool/apply_final_flow_patch.py
           python mobile/tool/fix_final_flow_generated.py
           git diff --check
 
-      - name: Commit patched source
+      - name: Commit cleaned source
         run: |
           if git diff --quiet -- mobile/lib/screens/game_screen.dart; then
             echo 'No source changes needed.'
@@ -36,5 +34,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add mobile/lib/screens/game_screen.dart
-          git commit -m 'Apply final voting and ending UI flow'
+          git commit -m 'Clean final voting and ending UI source'
           git push origin HEAD:master
