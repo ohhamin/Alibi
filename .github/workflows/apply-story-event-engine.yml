@@ -16,6 +16,9 @@ permissions:
 jobs:
   patch:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://user:pass@localhost:5432/postgres
+      PYTHONPATH: .
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,11 +28,15 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Patch source
+      - name: Patch and verify source
         run: |
           python backend/tool/apply_story_event_engine.py
           git diff --check
-          python -m compileall -q backend/app
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+          python -m compileall -q app tests
+          pytest -q
 
       - name: Commit patched source
         run: |
