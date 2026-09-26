@@ -2728,13 +2728,25 @@ class GameService:
 
             state['action_cycle'] = cycle
             state['actor_index'] = len(order)
+            round_before = int(session['current_turn'])
             await self._advance_round(cur, session, turn, state)
             await self._set_actor_preview(session, state)
-            if (
-                not _as_dict(state.get('active_conversation'))
-                and not _as_dict(state.get('pending_npc_question'))
-                and not _as_dict(state.get('pending_evidence_submission'))
-            ):
+
+            # Continue automatically only when a new round was actually opened.
+            # End-of-round gates intentionally keep the same round and must
+            # return control to the client instead of recursing indefinitely.
+            round_advanced = int(session['current_turn']) != round_before
+            blocked = bool(
+                _as_dict(state.get('active_conversation'))
+                or _as_dict(state.get('pending_npc_question'))
+                or _as_dict(state.get('pending_evidence_submission'))
+                or _as_dict(state.get('pending_final_vote'))
+            )
+            completed = (
+                str(session.get('status') or '') == 'completed'
+                or bool(_as_dict(state.get('detective_verdict')))
+            )
+            if round_advanced and not blocked and not completed:
                 await self._advance_turn_sequence(cur, session, turn, state)
             return
 

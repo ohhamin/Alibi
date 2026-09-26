@@ -210,7 +210,7 @@ class AgentService:
                 model=self.settings.openai_model,
                 instructions=instructions,
                 input=json.dumps(payload, ensure_ascii=False, default=str),
-                max_output_tokens=min(self.settings.openai_max_output_tokens, 180),
+                max_output_tokens=min(self.settings.openai_max_output_tokens, 280),
             )
             raw = (response.output_text or '').strip()
             if raw.startswith('```'):
@@ -230,7 +230,7 @@ class AgentService:
                         or ctx.exchange_no >= ctx.max_exchanges,
                     }
         except (OpenAIError, json.JSONDecodeError, TypeError, ValueError):
-            logger.exception('OpenAI conversation response failed; using fallback')
+            logger.warning('OpenAI conversation response failed; using fallback')
         return fallback
     async def interpret_game_action(self, ctx: GameMasterContext) -> dict[str, Any]:
         fallback = {
@@ -515,7 +515,7 @@ reasoning에는 지목에 영향을 준 구체적인 단서·시간·진술을 �
                 model=self.settings.openai_model,
                 instructions=instructions,
                 input=input_text,
-                max_output_tokens=min(self.settings.openai_max_output_tokens, 180),
+                max_output_tokens=min(self.settings.openai_max_output_tokens, 280),
             )
             raw = (response.output_text or '').strip()
             if raw.startswith('```'):
@@ -530,8 +530,7 @@ reasoning에는 지목에 영향을 준 구체적인 단서·시간·진술을 �
                 return parsed
         except (OpenAIError, json.JSONDecodeError, TypeError, ValueError):
             logger.warning(
-                'OpenAI structured response failed; using deterministic fallback',
-                exc_info=True,
+                'OpenAI structured response failed; using deterministic fallback'
             )
         return fallback
 

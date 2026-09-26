@@ -987,13 +987,13 @@ reasoning에는 구체적인 증거·시간·진술과 용의자 의견을 어�
         )
         solution = await cur.fetchone()
         culprit_id = str(solution['culprit_character_id']) if solution and solution['culprit_character_id'] else ''
-        caught = accused_id == culprit_id
         player_id = str(session.get('player_character_id') or '')
         player_is_culprit = player_id == culprit_id
+        success = accused_id != player_id
         if player_is_culprit:
-            ending_code = 'culprit-caught' if caught else 'culprit-escape'
+            ending_code = 'culprit-escape' if success else 'culprit-caught'
         else:
-            ending_code = 'suspect-innocent-win' if caught else 'suspect-innocent-fail'
+            ending_code = 'suspect-innocent-win' if success else 'suspect-innocent-fail'
 
         reasoning = str(verdict.get('reasoning') or '').strip()
         accused_name = accused['display_name'] if accused else '알 수 없는 인물'
@@ -1004,7 +1004,6 @@ reasoning에는 구체적인 증거·시간·진술과 용의자 의견을 어�
             'reasoning': reasoning,
             'considered_suspect_votes': True,
         }
-        success = accused_id != player_id
         state['player_outcome'] = {
             'success': success,
             'label': '성공' if success else '실패',
