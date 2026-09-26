@@ -421,6 +421,8 @@ class GameService:
                 row_number() over (order by random()) as slot_no
               from game_private.story_clues c
               where c.story_version_id = %s
+                and coalesce((c.reveal_rule->>'initial_eligible')::boolean, true) = true
+                and coalesce(c.reveal_rule->>'required_event', '') = ''
                 and not exists (
                   select 1
                   from game_private.session_evidence_holdings h
@@ -1341,11 +1343,35 @@ class GameService:
             ),
         )
         clue_rows = list(await cur.fetchall())
+        await cur.execute(
+            """
+            select payload->>'event_code' as event_code
+            from game_private.internal_events
+            where session_id = %s
+              and event_type = 'story_scripted_event'
+            """,
+            (session['id'],),
+        )
+        fired_story_events = {
+            str(row['event_code'])
+            for row in await cur.fetchall()
+            if row.get('event_code')
+        }
         hidden_candidates: list[dict[str, Any]] = []
         clue_map: dict[str, dict[str, Any]] = {}
         same_room_codes = {str(row.get('code') or '') for row in same_room}
         for clue in clue_rows:
             reveal_rule = _as_dict(clue['reveal_rule'])
+            required_event = str(reveal_rule.get('required_event') or '').strip()
+            if required_event and required_event not in fired_story_events:
+                continue
+            required_events = {
+                str(item)
+                for item in _as_list(reveal_rule.get('required_events'))
+                if str(item).strip()
+            }
+            if required_events and not required_events.issubset(fired_story_events):
+                continue
             required_character = str(reveal_rule.get('character') or '').strip()
             if required_character and required_character not in same_room_codes:
                 continue
@@ -3234,6 +3260,16 @@ class GameService:
               and l.code = %s
               and coalesce((c.reveal_rule->>'min_round')::int, 1) <= %s
               and (
+                coalesce(c.reveal_rule->>'required_event', '') = ''
+                or exists (
+                    select 1
+                    from game_private.internal_events ie_gate
+                    where ie_gate.session_id = %s
+                      and ie_gate.event_type = 'story_scripted_event'
+                      and ie_gate.payload->>'event_code' = c.reveal_rule->>'required_event'
+                )
+              )
+              and (
                 c.reveal_rule->>'character' is null
                 or exists (
                     select 1
@@ -3268,6 +3304,7 @@ class GameService:
                 session['story_version_id'],
                 target_code,
                 session['current_turn'],
+                session['id'],
                 session['id'],
                 target_code,
                 session['id'],
@@ -3495,6 +3532,16 @@ class GameService:
               and l.code = %s
               and coalesce((c.reveal_rule->>'min_round')::int, 1) <= %s
               and (
+                coalesce(c.reveal_rule->>'required_event', '') = ''
+                or exists (
+                    select 1
+                    from game_private.internal_events ie_gate
+                    where ie_gate.session_id = %s
+                      and ie_gate.event_type = 'story_scripted_event'
+                      and ie_gate.payload->>'event_code' = c.reveal_rule->>'required_event'
+                )
+              )
+              and (
                 c.reveal_rule->>'character' is null
                 or exists (
                   select 1
@@ -3529,6 +3576,7 @@ class GameService:
                 session['story_version_id'],
                 location_code,
                 session['current_turn'],
+                session['id'],
                 session['id'],
                 location_code,
                 session['id'],
